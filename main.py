@@ -44,7 +44,7 @@ def get_lot_info(symbol):
     return None
 
 def round_step(quantity, step):
-    return math.floor(quantity / step) * step
+    return float(f"{math.floor(quantity / step) * step:.8f}")
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -59,6 +59,8 @@ def webhook():
         take_profit_pct = float(data.get("take_profit", 7.0))
 
         price = get_price(symbol)
+        if price == 0:
+            return jsonify({"error": f"Precio inválido para {symbol}. Valor recibido: {price}"}), 400
         usdt = get_balance()
         one_percent = usdt * 0.01
 
