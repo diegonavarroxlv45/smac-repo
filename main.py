@@ -26,8 +26,8 @@ def get_balance():
     headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
     url = "https://api.binance.com/api/v3/account"
     balances = requests.get(url, headers=headers, params=params).json().get("balances", [])
-    usdt_balance = next((item for item in balances if item["asset"] == "USDT"), None)
-    return float(usdt_balance["free"]) if usdt_balance else 0
+    usdc_balance = next((item for item in balances if item["asset"] == "USDC"), None)
+    return float(usdc_balance["free"]) if usdc_balance else 0
 
 def get_lot_info(symbol):
     # Obtener reglas de trading para el símbolo
@@ -61,8 +61,8 @@ def webhook():
         price = get_price(symbol)
         if price == 0:
             return jsonify({"error": f"Precio inválido para {symbol}. Valor recibido: {price}"}), 400
-        usdt = get_balance()
-        one_percent = usdt * 0.01
+        usdc = get_balance()
+        one_percent = usdc * 0.01
 
         lot_info = get_lot_info(symbol)
         if lot_info is None:
