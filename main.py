@@ -1,4 +1,4 @@
-# main.py definitivo y adaptado
+# main.py
 from flask import Flask, request, jsonify
 import hmac, hashlib, time
 import requests
