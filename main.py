@@ -1,4 +1,4 @@
-# main.py mejorado
+# main.py definitivo y adaptado
 from flask import Flask, request, jsonify
 import hmac, hashlib, time
 import requests
@@ -30,7 +30,6 @@ def get_balance():
     return float(usdc_balance["free"]) if usdc_balance else 0
 
 def get_lot_info(symbol):
-    # Obtener reglas de trading para el símbolo
     url = "https://api.binance.com/api/v3/exchangeInfo"
     data = requests.get(url).json()
     for s in data["symbols"]:
@@ -55,27 +54,25 @@ def webhook():
     try:
         symbol = data["symbol"]
         side = data["side"].upper()  # BUY o SELL
-        stop_loss_pct = float(data.get("stop_loss", 3.5))
-        take_profit_pct = float(data.get("take_profit", 7.0))
+        entry_price = float(data["entry_price"])
+        stop_loss = float(data["stop_loss"])
+        take_profit = float(data["take_profit"])
+        position_type = int(float(data["position_type"]))  # 1 = Long, 0 = Short
 
-        price = get_price(symbol)
-        if price == 0:
-            return jsonify({"error": f"Precio inválido para {symbol}. Valor recibido: {price}"}), 400
         usdc = get_balance()
         one_percent = usdc * 0.01
-
         lot_info = get_lot_info(symbol)
         if lot_info is None:
             return jsonify({"error": f"No se pudo obtener info de lotes para {symbol}"}), 400
 
+        price = get_price(symbol)
         raw_quantity = one_percent / price
         quantity = round_step(raw_quantity, lot_info["stepSize"])
 
-        # Verificar cantidad mínima
         if quantity < lot_info["minQty"]:
             return jsonify({"error": f"Cantidad calculada {quantity} menor que mínimo {lot_info['minQty']} para {symbol}"}), 400
 
-        # Orden mercado
+        # Orden de mercado
         url_order = "https://api.binance.com/api/v3/order"
         timestamp = int(time.time() * 1000)
         order_params = {
@@ -93,17 +90,20 @@ def webhook():
         if "code" in order_data and order_data["code"] < 0:
             return jsonify({"error": f"Error en orden de mercado: {order_data}"}), 400
 
-        if side == "BUY":
-            sl_price = round(price * (1 - stop_loss_pct / 100), 2)
-            tp_price = round(price * (1 + take_profit_pct / 100), 2)
-        else:
-            sl_price = round(price * (1 + stop_loss_pct / 100), 2)
-            tp_price = round(price * (1 - take_profit_pct / 100), 2)
+        # SL y TP coherentes según dirección
+        if position_type == 1:  # Long
+            sl_price = stop_loss
+            tp_price = take_profit
+            oco_side = "SELL"
+        else:  # Short
+            sl_price = stop_loss
+            tp_price = take_profit
+            oco_side = "BUY"
 
         oco_url = "https://api.binance.com/api/v3/order/oco"
         oco_params = {
             "symbol": symbol,
-            "side": "SELL" if side == "BUY" else "BUY",
+            "side": oco_side,
             "quantity": f"{quantity:.8f}",
             "price": f"{tp_price:.2f}",
             "stopPrice": f"{sl_price:.2f}",
