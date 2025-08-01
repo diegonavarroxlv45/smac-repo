@@ -49,9 +49,12 @@ def round_step(quantity, step):
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.json
-    print("📩 Webhook received:")
-    print(data)
+    data = request.get_json(force=True)  # Fuerza a parsear JSON aunque sea text/plain
+    if not data:
+        return jsonify({"error": "No JSON data received"}), 400
+
+    print("Webhook recibido:", data)
+
 
     if not data:
         return jsonify({"error": "No data received"}), 400
