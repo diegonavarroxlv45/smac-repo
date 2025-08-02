@@ -1,3 +1,4 @@
+# main.py
 from flask import Flask, request, jsonify
 import hmac
 import hashlib
@@ -11,16 +12,22 @@ app = Flask(__name__)
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
 
+
+# -------------------- Funciones auxiliares -------------------- #
+
 def sign_params(params, secret):
+    """Firma los parámetros para las peticiones de Binance"""
     query_string = "&".join([f"{k}={v}" for k, v in params.items()])
     signature = hmac.new(secret.encode(), query_string.encode(), hashlib.sha256).hexdigest()
     return signature
 
 def get_price(symbol):
+    """Obtiene el precio actual de un símbolo"""
     url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
     return float(requests.get(url).json()["price"])
 
 def get_balance():
+    """Obtiene el balance de USDC disponible"""
     timestamp = int(time.time() * 1000)
     params = {"timestamp": timestamp}
     params["signature"] = sign_params(params, BINANCE_API_SECRET)
@@ -32,6 +39,7 @@ def get_balance():
     return float(usdc_balance["free"]) if usdc_balance else 0
 
 def get_lot_info(symbol):
+    """Obtiene el tamaño mínimo y step size de un símbolo"""
     url = "https://api.binance.com/api/v3/exchangeInfo"
     data = requests.get(url).json()
     for s in data["symbols"]:
@@ -45,48 +53,49 @@ def get_lot_info(symbol):
     return None
 
 def round_step(quantity, step):
+    """Redondea la cantidad al step size de Binance"""
     return float(f"{math.floor(quantity / step) * step:.8f}")
+
+
+# -------------------- Webhook -------------------- #
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.get_json(force=True)  # Fuerza a parsear JSON aunque sea text/plain
+    data = request.get_json(force=True)  # Acepta text/plain de TradingView como JSON
     if not data:
         return jsonify({"error": "No JSON data received"}), 400
 
-    print("Webhook recibido:", data)
-
-
-    if not data:
-        return jsonify({"error": "No data received"}), 400
+    print("📩 Webhook recibido:", data)  # Log completo en Render
 
     try:
+        # Extraer datos del JSON
         symbol = data["symbol"]
-        side = data["side"].upper()               # BUY o SELL
+        side = data["side"].upper()                # BUY o SELL
         entry_price = float(data["entry_price"])
         stop_loss = float(data["sl"])
         take_profit = float(data["tp"])
-        position_type = data["position_type"].upper()  # "Long" o "Short"
+        position_type = data["position_type"].upper()  # Long o Short
+
         if position_type not in ["LONG", "SHORT"]:
-            return jsonify({"error": f"Not valid position_type: {position_type}"}), 400
+            return jsonify({"error": f"Invalid position_type: {position_type}"}), 400
 
-
-        # Obtener balance y calcular el 2% en USDC
+        # Calcular el 2% del balance en USDC
         usdc = get_balance()
         two_percent = usdc * 0.02
         lot_info = get_lot_info(symbol)
         if lot_info is None:
-            return jsonify({"error": f"Could not get batch info for {symbol}"}), 400
+            return jsonify({"error": f"Could not get lot info for {symbol}"}), 400
 
-        # Obtener precio actual
+        # Calcular cantidad redondeada
         price = get_price(symbol)
         raw_quantity = two_percent / price
         quantity = round_step(raw_quantity, lot_info["stepSize"])
 
         if quantity < lot_info["minQty"]:
-            return jsonify({"error": f"Calculated amount {quantity} less than minimum {lot_info['minQty']} para {symbol}"}), 400
+            return jsonify({"error": f"Quantity {quantity} < min {lot_info['minQty']} for {symbol}"}), 400
 
-        # Lanzar orden de mercado
-        print("🟢 Issuing market order...")
+        # Orden de mercado
+        print(f"🟢 Market Order: {side} {quantity} {symbol} @ {entry_price}")
         url_order = "https://api.binance.com/api/v3/order"
         timestamp = int(time.time() * 1000)
         order_params = {
@@ -104,17 +113,17 @@ def webhook():
         if "code" in order_data and order_data["code"] < 0:
             return jsonify({"error": f"Market order error: {order_data}"}), 400
 
-        # Definir SL y TP según posición
+        # OCO (SL y TP)
         if position_type == "LONG":
             sl_price = stop_loss
             tp_price = take_profit
             oco_side = "SELL"
-        else:  # SHORT
+        else:
             sl_price = stop_loss
             tp_price = take_profit
             oco_side = "BUY"
 
-        print("📉 Placing OCO order OCO...")
+        print(f"📉 OCO Order: {oco_side} {quantity} {symbol}, SL={sl_price}, TP={tp_price}")
         oco_url = "https://api.binance.com/api/v3/order/oco"
         oco_params = {
             "symbol": symbol,
@@ -130,7 +139,7 @@ def webhook():
         oco_response = requests.post(oco_url, headers=headers, params=oco_params)
 
         return jsonify({
-            "status": "✅ Order executed correctly",
+            "status": "✅ Order executed",
             "market_order": order_data,
             "oco_order": oco_response.json()
         })
@@ -138,6 +147,3 @@ def webhook():
     except Exception as e:
         print("❌ ERROR:", str(e))
         return jsonify({"error": str(e)}), 500
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
