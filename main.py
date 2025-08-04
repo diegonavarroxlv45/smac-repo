@@ -63,6 +63,7 @@ def round_step(quantity, step):
 def webhook():
     data = request.get_json(force=True)  # Acepta text/plain de TradingView como JSON
     if not data:
+        print("❌ JSON inválido:", request.data)
         return jsonify({"error": "No JSON data received"}), 400
 
     print("📩 Webhook recibido:", data)  # Log completo en Render
