@@ -6,6 +6,8 @@ import time
 import requests
 import os
 import math
+import functools
+print = functools.partial(print, flush=True)
 
 app = Flask(__name__)
 
@@ -63,10 +65,10 @@ def round_step(quantity, step):
 def webhook():
     data = request.get_json(force=True)  # Acepta text/plain de TradingView como JSON
     if not data:
-        print("❌ Invalid JSON:", request.data, flush=True)
+        print("❌ Invalid JSON:", request.data)
         return jsonify({"error": "No JSON data received"}), 400
 
-    print("📩 Webhook recibido:", data, flush=True)
+    print("📩 Webhook recibido:", data)
 
     try:
         # Extraer datos del JSON
@@ -96,7 +98,7 @@ def webhook():
             return jsonify({"error": f"Quantity {quantity} < min {lot_info['minQty']} for {symbol}"}), 400
 
         # Orden de mercado
-        print(f"🟢 Market Order: {side} {quantity} {symbol} @ {entry_price}, flush=True")
+        print(f"🟢 Market Order: {side} {quantity} {symbol} @ {entry_price}")
         url_order = "https://api.binance.com/api/v3/order"
         timestamp = int(time.time() * 1000)
         order_params = {
@@ -124,7 +126,7 @@ def webhook():
             tp_price = take_profit
             oco_side = "BUY"
 
-        print(f"📉 OCO Order: {oco_side} {quantity} {symbol}, SL={sl_price}, TP={tp_price}, flush=True")
+        print(f"📉 OCO Order: {oco_side} {quantity} {symbol}, SL={sl_price}, TP={tp_price}")
         oco_url = "https://api.binance.com/api/v3/order/oco"
         oco_params = {
             "symbol": symbol,
