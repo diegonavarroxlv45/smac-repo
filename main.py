@@ -69,6 +69,7 @@ def webhook():
         return jsonify({"error": "No JSON data received"}), 400
 
     print("📩 Webhook recibido:", data)
+    return jsonify({"status": "ok"}), 200
 
     try:
         # Extraer datos del JSON
