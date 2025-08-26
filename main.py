@@ -68,7 +68,7 @@ def webhook():
         print("❌ Invalid JSON:", request.data)
         return jsonify({"error": "No JSON data received"}), 400
 
-    print("📩 Webhook recibido:", data)
+    print("📩 Webhook received:", data)
     return jsonify({"status": "ok"}), 200
 
     try:
