@@ -69,7 +69,6 @@ def webhook():
         return jsonify({"error": "No JSON data received"}), 400
 
     print("📩 Webhook received:", data)
-    return jsonify({"status": "ok"}), 200
 
     try:
         # Extraer datos del JSON
@@ -146,7 +145,7 @@ def webhook():
             "status": "✅ Order executed",
             "market_order": order_data,
             "oco_order": oco_response.json()
-        })
+        }), 200
 
     except Exception as e:
         print("❌ ERROR:", str(e))
