@@ -78,7 +78,7 @@ def webhook():
 
         # --- Solo procesar BUY ---
         usdc = get_balance("USDC")
-        two_percent = usdc * 0.02
+        two_percent = usdc * 0.04
         if two_percent <= 0:
             return jsonify({"error": "No USDC balance"}), 400
 
