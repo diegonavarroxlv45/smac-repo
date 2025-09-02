@@ -73,7 +73,7 @@ def webhook():
 
         # --- Ignorar SELL ---
         if side == "SELL":
-            print(f"⏭ Ignorado SELL en {symbol}")
+            print(f"⏭ SELL ignored in {symbol}")
             return jsonify({"status": f"Ignored SELL for {symbol}"}), 200
 
         # --- Solo procesar BUY ---
