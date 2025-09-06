@@ -194,6 +194,10 @@ def webhook():
         executed_qty_str = order_data.get("executedQty", qty_str)
         print("✅ Market order executed:", {"executedQty": executed_qty_str, "order": order_data})
 
+        # --- Ajustar cantidad disponible para OCO ---
+        oco_qty = float(executed_qty_str) * 0.999  # dejamos margen por comisión
+        oco_qty_str = floor_to_step_str(oco_qty, stepSize_str)
+
         # --- PREPARAR OCO (ajustes de precisión y colchón) ---
         tp_adj = floor_to_step_str(tp, tickSize_str)
         # colchón en SL para evitar rechazo "stopPrice too close" (reducción leve)
@@ -213,7 +217,7 @@ def webhook():
             oco_params = {
                 "symbol": symbol,
                 "side": "SELL",
-                "quantity": executed_qty_str,
+                "quantity": oco_qty_str,
                 "price": tp_adj,
                 "stopPrice": sl_adj,
                 "stopLimitPrice": stop_limit_adj,
