@@ -118,10 +118,32 @@ def webhook():
             print("⚠️", msg)
             return jsonify({"error": msg}), 400
 
-        # --- IGNORAR SELL (según lógica decidida) ---
+        # --- PROCESAR SELL (vender todo el balance disponible) ---
         if side == "SELL":
-            print(f"⏭ SELL ignored for {symbol}")
-            return jsonify({"status": f"Ignored SELL for {symbol}"}), 200
+            try:
+                # Detectar el asset base (ejemplo: ETH de ETHUSDC)
+                base_asset = symbol.replace("USDC", "")  
+
+                # Obtener balance disponible de ese asset
+                balance = client.get_asset_balance(asset=base_asset)
+                qty = float(balance["free"])
+
+                if qty > 0:
+                    order = client.create_order(
+                        symbol=symbol,
+                        side="SELL",
+                        type="MARKET",
+                        quantity=qty
+                    )
+                    print(f"✅ SELL ejecutado: Vendidos {qty} {base_asset} en {symbol}")
+                    return jsonify({"status": f"SELL ejecutado para {symbol}, cantidad: {qty}"}), 200
+                else:
+                    print(f"⚠ No hay {base_asset} disponible para vender en {symbol}")
+                    return jsonify({"status": f"Sin balance disponible para {symbol}"}), 200
+
+            except Exception as e:
+                print(f"❌ Error al procesar SELL para {symbol}: {e}")
+                return jsonify({"status": "Error en SELL", "error": str(e)}), 500
 
         # --- Solo procesar BUY ---
         usdc = get_balance("USDC")
