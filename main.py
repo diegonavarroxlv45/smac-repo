@@ -118,31 +118,76 @@ def webhook():
             print("⚠️", msg)
             return jsonify({"error": msg}), 400
 
-        # --- PROCESAR SELL (vender todo el balance disponible) ---
+        # --- PROCESAR SELL (vender todo el balance disponible del token base) ---
         if side == "SELL":
             try:
-                # Detectar el asset base (ejemplo: ETH de ETHUSDC)
-                base_asset = symbol.replace("USDC", "")  
+                # --- detectar base asset buscando sufijos comunes (USDC/USDT/BUSD/...) ---
+                quote_candidates = ["USDC", "USDT", "BUSD", "EUR", "USD", "BTC", "ETH", "BNB"]
+                base_asset = None
+                for q in quote_candidates:
+                    if symbol.endswith(q):
+                        base_asset = symbol[:-len(q)]
+                        break
+                if base_asset is None or base_asset == "":
+                    # fallback: quitar 4 caracteres (útil si usas USDC/USDT/busd en la mayoría)
+                    base_asset = symbol[:-4]
 
-                # Obtener balance disponible de ese asset
-                balance = client.get_asset_balance(asset=base_asset)
-                qty = float(balance["free"])
+                # obtener balance libre del asset base
+                base_free = get_balance(base_asset)
+                print(f"ℹ️ Detected base_asset={base_asset}, free={base_free}")
 
-                if qty > 0:
-                    order = client.create_order(
-                        symbol=symbol,
-                        side="SELL",
-                        type="MARKET",
-                        quantity=qty
-                    )
-                    print(f"✅ SELL ejecutado: Vendidos {qty} {base_asset} en {symbol}")
-                    return jsonify({"status": f"SELL ejecutado para {symbol}, cantidad: {qty}"}), 200
-                else:
-                    print(f"⚠ No hay {base_asset} disponible para vender en {symbol}")
-                    return jsonify({"status": f"Sin balance disponible para {symbol}"}), 200
+                if base_free <= 0:
+                    print(f"⚠️ No {base_asset} balance to sell for {symbol}")
+                    return jsonify({"status": f"No {base_asset} balance to sell for {symbol}"}), 200
+
+                # obtener filtros (stepSize / minQty) del mercado para redondear
+                lot = get_lot_info(symbol)
+                if not lot:
+                    msg = f"Lot info not found for {symbol}"
+                    print("⚠️", msg)
+                    return jsonify({"error": msg}), 400
+
+                stepSize_str = lot.get("stepSize_str")
+                minQty = lot.get("minQty")
+
+                if not stepSize_str or minQty is None:
+                    msg = f"Incomplete market filters for {symbol}"
+                    print("⚠️", msg, lot)
+                    return jsonify({"error": msg}), 400
+
+                # redondear hacia abajo al stepSize (usar floor_to_step_str)
+                qty_str = floor_to_step_str(base_free, stepSize_str)
+                qty = float(qty_str)
+
+                if qty < minQty:
+                    msg = f"Quantity to sell {qty} < minQty {minQty} for {symbol}"
+                    print("⚠️", msg)
+                    return jsonify({"error": msg}), 400
+
+                # preparar orden MARKET SELL (vendemos qty_str)
+                print(f"🟠 Placing MARKET SELL -> {qty_str} {symbol} (attempting to sell full free balance)")
+                ts = int(time.time() * 1000)
+                order_params = {
+                    "symbol": symbol,
+                    "side": "SELL",
+                    "type": "MARKET",
+                    "quantity": qty_str,
+                    "timestamp": ts
+                }
+                order_params["signature"] = sign_params(order_params, BINANCE_API_SECRET)
+                headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
+                r_order = requests.post(f"{BASE_URL}/api/v3/order", headers=headers, params=order_params, timeout=10)
+                order_data = r_order.json()
+
+                if r_order.status_code != 200:
+                    print("❌ Market SELL failed:", order_data)
+                    return jsonify({"error": "Market SELL failed", "details": order_data}), 400
+
+                print("✅ Market SELL executed:", order_data)
+                return jsonify({"status": "✅ SELL executed", "order": order_data}), 200
 
             except Exception as e:
-                print(f"❌ Error al procesar SELL para {symbol}: {e}")
+                print(f"❌ Error al procesar SELL para {symbol}: {repr(e)}")
                 return jsonify({"status": "Error en SELL", "error": str(e)}), 500
 
         # --- Solo procesar BUY ---
