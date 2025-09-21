@@ -1,330 +1,166 @@
-# main.py
-from flask import Flask, request, jsonify
+import os
+import time
 import hmac
 import hashlib
-import time
 import requests
-import os
-import math
-import functools
-from decimal import Decimal, ROUND_DOWN
+from flask import Flask, request, jsonify
 
-# Force stdout flush so logs aparecen inmediatamente en Render
-print = functools.partial(print, flush=True)
-
-app = Flask(__name__)
-
+# ================= CONFIG =================
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
 BASE_URL = "https://api.binance.com"
 
-# -------------------- Auxiliares -------------------- #
+app = Flask(__name__)
 
-def sign_params(params: dict, secret: str) -> str:
-    """
-    Firma parámetros en el orden dado (Python 3.7+ preserva orden de inserción).
-    Devuelve hex digest de HMAC-SHA256.
-    """
-    query = "&".join([f"{k}={v}" for k, v in params.items()])
-    return hmac.new(secret.encode(), query.encode(), hashlib.sha256).hexdigest()
+# ================= HELPERS =================
+def sign_params(params, secret):
+    query_string = "&".join([f"{k}={params[k]}" for k in sorted(params)])
+    return hmac.new(secret.encode("utf-8"), query_string.encode("utf-8"), hashlib.sha256).hexdigest()
 
-
-def get_price(symbol: str) -> float:
-    r = requests.get(f"{BASE_URL}/api/v3/ticker/price", params={"symbol": symbol})
-    r.raise_for_status()
-    return float(r.json()["price"])
-
-
-def get_balance(asset="USDC") -> float:
-    ts = int(time.time() * 1000)
-    params = {"timestamp": ts}
-    params["signature"] = sign_params(params, BINANCE_API_SECRET)
-    headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
-    r = requests.get(f"{BASE_URL}/api/v3/account", headers=headers, params=params, timeout=10)
-    r.raise_for_status()
-    data = r.json()
-    bal = next((b for b in data.get("balances", []) if b["asset"] == asset), None)
-    return float(bal["free"]) if bal else 0.0
-
-
-def get_lot_info(symbol: str):
-    """
-    Devuelve dict con:
-      - stepSize_str (string, p.ej. "0.00000100")
-      - minQty (float)
-      - tickSize_str (string)
-      - minNotional (float) o 0.0
-    """
-    r = requests.get(f"{BASE_URL}/api/v3/exchangeInfo", params={"symbol": symbol}, timeout=10)
-    r.raise_for_status()
-    data = r.json()
-    s = next((x for x in data.get("symbols", []) if x["symbol"] == symbol), None)
-    if not s:
-        return None
-    lot = {"stepSize_str": None, "minQty": None, "tickSize_str": None, "minNotional": 0.0}
-    for f in s.get("filters", []):
-        t = f.get("filterType")
-        if t == "LOT_SIZE":
-            lot["stepSize_str"] = f.get("stepSize")
-            lot["minQty"] = float(f.get("minQty"))
-        elif t == "PRICE_FILTER":
-            lot["tickSize_str"] = f.get("tickSize")
-        elif t in ("MIN_NOTIONAL", "NOTIONAL"):
-            lot["minNotional"] = float(f.get("minNotional") or f.get("minNotional", 0.0))
-    return lot
-
-
-def floor_to_step_str(value: float, step_str: str) -> str:
-    """
-    Ajusta 'value' hacia abajo al múltiplo de 'step_str' (usando Decimal) y devuelve string
-    con tantos decimales como el step.
-    """
-    v = Decimal(str(value))
-    step = Decimal(str(step_str))
-    # floor to multiple of step
-    d = (v // step) * step
-    decimals = -step.as_tuple().exponent if step.as_tuple().exponent < 0 else 0
-    # format without scientific notation
-    return format(d.quantize(Decimal(1).scaleb(-decimals), rounding=ROUND_DOWN), f".{decimals}f")
-
-
-# -------------------- Webhook -------------------- #
-
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    data = request.get_json(force=True)
-    if not data:
-        print("❌ Invalid JSON payload:", request.data)
-        return jsonify({"error": "No JSON data received"}), 400
-
-    print("📩 Webhook received:", data)
-
+def get_balance(asset):
     try:
-        symbol = data["symbol"]                      # e.g. "BTCUSDC"
-        side = data["side"].upper()                  # "BUY" or "SELL"
-        entry_price = float(data.get("entry_price", 0))
-        sl = float(data.get("sl", 0))
-        tp = float(data.get("tp", 0))
-        position_type = data.get("position_type", "").upper()  # "LONG" or "SHORT"
+        ts = int(time.time() * 1000)
+        params = {"timestamp": ts}
+        params["signature"] = sign_params(params, BINANCE_API_SECRET)
+        headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
+        r = requests.get(f"{BASE_URL}/api/v3/account", headers=headers, params=params, timeout=10)
+        r.raise_for_status()
+        balances = r.json()["balances"]
+        for b in balances:
+            if b["asset"] == asset:
+                return float(b["free"])
+        return 0.0
+    except Exception as e:
+        print(f"❌ Error getting balance for {asset}: {e}")
+        return 0.0
 
-        # Validaciones básicas
-        if position_type not in ["LONG", "SHORT"]:
-            msg = f"Invalid position_type: {position_type}"
-            print("⚠️", msg)
-            return jsonify({"error": msg}), 400
-
-        if side not in ["BUY", "SELL"]:
-            msg = f"Invalid side: {side}"
-            print("⚠️", msg)
-            return jsonify({"error": msg}), 400
-
-        # --- PROCESAR SELL (vender todo el balance disponible del token base) ---
-        if side == "SELL":
-            try:
-                # --- detectar base asset buscando sufijos comunes (USDC/USDT/BUSD/...) ---
-                quote_candidates = ["USDC", "USDT", "BUSD", "EUR", "USD", "BTC", "ETH", "BNB"]
-                base_asset = None
-                for q in quote_candidates:
-                    if symbol.endswith(q):
-                        base_asset = symbol[:-len(q)]
-                        break
-                if base_asset is None or base_asset == "":
-                    # fallback: quitar 4 caracteres (útil si usas USDC/USDT/busd en la mayoría)
-                    base_asset = symbol[:-4]
-
-                # obtener balance libre del asset base
-                base_free = get_balance(base_asset)
-                print(f"ℹ️ Detected base_asset={base_asset}, free={base_free}")
-
-                if base_free <= 0:
-                    print(f"⚠️ No {base_asset} balance to sell for {symbol}")
-                    return jsonify({"status": f"No {base_asset} balance to sell for {symbol}"}), 200
-
-                # obtener filtros (stepSize / minQty) del mercado para redondear
-                lot = get_lot_info(symbol)
-                if not lot:
-                    msg = f"Lot info not found for {symbol}"
-                    print("⚠️", msg)
-                    return jsonify({"error": msg}), 400
-
-                stepSize_str = lot.get("stepSize_str")
-                minQty = lot.get("minQty")
-
-                if not stepSize_str or minQty is None:
-                    msg = f"Incomplete market filters for {symbol}"
-                    print("⚠️", msg, lot)
-                    return jsonify({"error": msg}), 400
-
-                # redondear hacia abajo al stepSize (usar floor_to_step_str)
-                qty_str = floor_to_step_str(base_free, stepSize_str)
-                qty = float(qty_str)
-
-                if qty < minQty:
-                    msg = f"Quantity to sell {qty} < minQty {minQty} for {symbol}"
-                    print("⚠️", msg)
-                    return jsonify({"error": msg}), 400
-
-                # preparar orden MARKET SELL (vendemos qty_str)
-                print(f"🟠 Placing MARKET SELL -> {qty_str} {symbol} (attempting to sell full free balance)")
-                ts = int(time.time() * 1000)
-                order_params = {
-                    "symbol": symbol,
-                    "side": "SELL",
-                    "type": "MARKET",
-                    "quantity": qty_str,
-                    "timestamp": ts
+def get_lot_info(symbol):
+    try:
+        r = requests.get(f"{BASE_URL}/api/v3/exchangeInfo", params={"symbol": symbol}, timeout=10)
+        r.raise_for_status()
+        data = r.json()["symbols"][0]
+        for f in data["filters"]:
+            if f["filterType"] == "LOT_SIZE":
+                return {
+                    "stepSize": float(f["stepSize"]),
+                    "stepSize_str": f["stepSize"],
+                    "minQty": float(f["minQty"]),
+                    "minNotional": float(next((fl["minNotional"] for fl in data["filters"] if fl["filterType"] == "MIN_NOTIONAL"), 0))
                 }
-                order_params["signature"] = sign_params(order_params, BINANCE_API_SECRET)
-                headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
-                r_order = requests.post(f"{BASE_URL}/api/v3/order", headers=headers, params=order_params, timeout=10)
-                order_data = r_order.json()
+        return None
+    except Exception as e:
+        print(f"❌ Error getting lot info for {symbol}: {e}")
+        return None
 
-                if r_order.status_code != 200:
-                    print("❌ Market SELL failed:", order_data)
-                    return jsonify({"error": "Market SELL failed", "details": order_data}), 400
+def get_price(symbol):
+    try:
+        r = requests.get(f"{BASE_URL}/api/v3/ticker/price", params={"symbol": symbol}, timeout=10)
+        r.raise_for_status()
+        return float(r.json()["price"])
+    except Exception as e:
+        print(f"❌ Error getting price for {symbol}: {e}")
+        return 0.0
 
-                print("✅ Market SELL executed:", order_data)
-                return jsonify({"status": "✅ SELL executed", "order": order_data}), 200
+def floor_to_step_str(value, stepSize_str):
+    step_decimals = abs(len(stepSize_str.split(".")[1].rstrip("0"))) if "." in stepSize_str else 0
+    return f"{value:.{step_decimals}f}"
 
-            except Exception as e:
-                print(f"❌ Error al procesar SELL para {symbol}: {repr(e)}")
-                return jsonify({"status": "Error en SELL", "error": str(e)}), 500
+# ================= POSITION MANAGEMENT =================
+def close_position(symbol: str):
+    """Cancela todas las órdenes abiertas de un símbolo y vende todo el balance disponible."""
+    try:
+        # 1. Cancelar órdenes abiertas
+        ts = int(time.time() * 1000)
+        params = {"symbol": symbol, "timestamp": ts}
+        params["signature"] = sign_params(params, BINANCE_API_SECRET)
+        headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
+        r = requests.get(f"{BASE_URL}/api/v3/openOrders", headers=headers, params=params, timeout=10)
+        r.raise_for_status()
+        open_orders = r.json()
 
-        # --- Solo procesar BUY ---
-        usdc = get_balance("USDC")
-        # Usa 4% si así lo tienes (ajusta a 0.02 para 2%)
-        two_percent_amount = usdc * 0.04
-        if two_percent_amount <= 0:
-            msg = f"USDC balance is zero or too low: {usdc}"
-            print("⚠️", msg)
-            return jsonify({"error": msg}), 400
+        for order in open_orders:
+            cancel_params = {"symbol": symbol, "orderId": order["orderId"], "timestamp": int(time.time() * 1000)}
+            cancel_params["signature"] = sign_params(cancel_params, BINANCE_API_SECRET)
+            rc = requests.delete(f"{BASE_URL}/api/v3/order", headers=headers, params=cancel_params, timeout=10)
+            print(f"🗑 Cancelled order {order['orderId']} for {symbol}: {rc.json()}")
 
+        # 2. Detectar base asset
+        quote_candidates = ["USDC","USDT","BUSD","EUR","USD","BTC","ETH","BNB"]
+        base_asset = None
+        for q in quote_candidates:
+            if symbol.endswith(q):
+                base_asset = symbol[:-len(q)]
+                break
+        if base_asset is None:
+            base_asset = symbol[:-4]  # fallback
+
+        # 3. Balance libre
+        base_free = get_balance(base_asset)
+        if base_free <= 0:
+            print(f"ℹ️ No {base_asset} left to close for {symbol}")
+            return None
+
+        # 4. Chequear minNotional
         lot = get_lot_info(symbol)
         if not lot:
-            msg = f"Lot info not found for {symbol}"
-            print("⚠️", msg)
-            return jsonify({"error": msg}), 400
+            print(f"⚠️ Lot info not found for {symbol}")
+            return None
 
         stepSize_str = lot["stepSize_str"]
         minQty = lot["minQty"]
-        tickSize_str = lot["tickSize_str"]
         minNotional = lot.get("minNotional", 0.0)
 
-        if not stepSize_str or minQty is None or not tickSize_str:
-            msg = f"Incomplete filters for {symbol}"
-            print("⚠️", msg, lot)
-            return jsonify({"error": msg}), 400
-
-        # Precio spot actual (si falla, usamos entry_price)
-        try:
-            spot_price = get_price(symbol)
-        except Exception:
-            spot_price = entry_price
-
-        # Cantidad bruta (en base asset) y redondeo a stepSize
-        raw_qty = two_percent_amount / spot_price
-        qty_str = floor_to_step_str(raw_qty, stepSize_str)
+        qty_str = floor_to_step_str(base_free, stepSize_str)
         qty = float(qty_str)
 
-        if qty < minQty:
-            msg = f"Quantity {qty} < minQty {minQty} for {symbol} (two_percent={two_percent_amount}, spot={spot_price})"
-            print("⚠️", msg)
-            return jsonify({"error": msg}), 400
+        ticker_price = get_price(symbol)
+        notional = qty * ticker_price
 
-        # Validar minNotional
-        notional = qty * spot_price
-        if notional < (minNotional or 0.0):
-            msg = f"Notional {notional:.8f} < minNotional {minNotional} for {symbol}"
-            print("⚠️", msg)
-            return jsonify({"error": msg}), 400
+        if qty < minQty or notional < minNotional:
+            print(f"⚠️ Close qty too small: {qty} ({notional} USDC). Skipping.")
+            return None
 
-        # --- Orden de mercado (BUY) ---
-        print(f"🟢 Placing MARKET BUY -> {qty_str} {symbol} (spot={spot_price}, target_usdc={two_percent_amount:.4f})")
+        # 5. Market SELL
         ts = int(time.time() * 1000)
         order_params = {
             "symbol": symbol,
-            "side": "BUY",
+            "side": "SELL",
             "type": "MARKET",
             "quantity": qty_str,
             "timestamp": ts
         }
-        # firmar y enviar
         order_params["signature"] = sign_params(order_params, BINANCE_API_SECRET)
-        headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
         r_order = requests.post(f"{BASE_URL}/api/v3/order", headers=headers, params=order_params, timeout=10)
-        order_data = r_order.json()
-
-        if r_order.status_code != 200:
-            print("❌ Market order failed:", order_data)
-            return jsonify({"error": "Market order failed", "details": order_data}), 400
-
-        executed_qty_str = order_data.get("executedQty", qty_str)
-        print("✅ Market order executed:", {"executedQty": executed_qty_str, "order": order_data})
-
-        # --- Ajustar cantidad disponible para OCO ---
-        oco_qty = float(executed_qty_str) * 0.999  # dejamos margen por comisión
-        oco_qty_str = floor_to_step_str(oco_qty, stepSize_str)
-
-        # --- PREPARAR OCO (ajustes de precisión y colchón) ---
-        tp_adj = floor_to_step_str(tp, tickSize_str)
-        # colchón en SL para evitar rechazo "stopPrice too close" (reducción leve)
-        sl_adj = floor_to_step_str(Decimal(str(sl)) * Decimal("0.999"), tickSize_str)
-        # stopLimit algo más conservador
-        stop_limit_adj = floor_to_step_str(Decimal(str(sl_adj)) * Decimal("0.999"), tickSize_str)
-
-        print("🔧 Adjusted TP/SL:", {"tp_adj": tp_adj, "sl_adj": sl_adj, "stop_limit_adj": stop_limit_adj})
-
-        # --- INTENTAR COLOCAR OCO (reintentos) ---
-        headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
-        oco_success = False
-        oco_resp_data = None
-
-        for attempt in range(1, 4):  # 3 intentos
-            ts = int(time.time() * 1000)
-            oco_params = {
-                "symbol": symbol,
-                "side": "SELL",
-                "quantity": oco_qty_str,
-                "price": tp_adj,
-                "stopPrice": sl_adj,
-                "stopLimitPrice": stop_limit_adj,
-                "stopLimitTimeInForce": "GTC",
-                "timestamp": ts
-            }
-            oco_params["signature"] = sign_params(oco_params, BINANCE_API_SECRET)
-            r_oco = requests.post(f"{BASE_URL}/api/v3/order/oco", headers=headers, params=oco_params, timeout=10)
-            oco_resp_data = r_oco.json()
-
-            if r_oco.status_code == 200:
-                print(f"✅ OCO placed (attempt {attempt}):", oco_resp_data)
-                oco_success = True
-                break
-            else:
-                print(f"⚠️ OCO failed (attempt {attempt}):", oco_resp_data)
-                time.sleep(2)  # pequeño delay antes de reintentar
-
-        if not oco_success:
-            # No cerramos como error crítico: market order ya ejecutada. Devolvemos advertencia.
-            print("⚠️ OCO failed after 3 attempts. Leaving market order in place.")
-            return jsonify({
-                "warning": "Market order executed but OCO failed after 3 attempts",
-                "market_order": order_data,
-                "oco_error": oco_resp_data
-            }), 200
-
-        # Si todo OK:
-        return jsonify({
-            "status": "✅ BUY executed and OCO placed",
-            "market_order": order_data,
-            "oco_order": oco_resp_data
-        }), 200
+        print(f"💥 Closed position {symbol}: {r_order.json()}")
+        return r_order.json()
 
     except Exception as e:
-        # imprime repr para tener más info (stack/exception)
-        print("❌ EXCEPTION:", repr(e))
-        return jsonify({"error": str(e)}), 500
+        print(f"❌ Error in close_position({symbol}): {e}")
+        return None
 
+# ================= WEBHOOK =================
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    data = request.json
+    if not data or "symbol" not in data or "side" not in data:
+        return jsonify({"error": "Invalid payload"}), 400
 
+    symbol = data["symbol"]
+    side = data["side"]
+
+    if side == "SELL":
+        print(f"🔎 Closing existing position before SELL {symbol}")
+        close_position(symbol)
+        # Aquí puedes añadir tu bloque de SELL original si quieres procesar SELLs manuales extra
+        return jsonify({"status": "SELL processed"})
+
+    elif side == "BUY":
+        # TODO: Implementar BUY logic como ya tenías, usando executedQty + OCOs
+        print(f"🟢 BUY signal for {symbol} (logic pendiente de implementar)")
+        return jsonify({"status": "BUY processed"})
+
+    return jsonify({"status": "ignored"})
+
+# ================= MAIN =================
 if __name__ == "__main__":
-    # Esto solo se usa cuando ejecutas localmente con `python main.py`
     app.run(host="0.0.0.0", port=5000)
