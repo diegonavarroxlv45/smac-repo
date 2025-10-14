@@ -146,6 +146,7 @@ def cancel_margin_open_orders(symbol: str):
         resp = send_signed_request("DELETE", "/sapi/v1/margin/openOrders", params)
         print(f"🗑 Cancelled openOrders for {symbol} (resp: {resp if DRY_RUN else 'ok'})")
     except Exception as e:
+        # algunos errores de Binance devuelven body vacío; solo logueamos y seguimos.
         print(f"⚠️ Could not cancel openOrders for {symbol}: {e}")
 
 def close_position_margin(symbol: str):
@@ -188,10 +189,10 @@ def close_position_margin(symbol: str):
 def execute_buy_margin(symbol: str, entry_price_from_alert: float = None, sl_from_alert: float = None, tp_from_alert: float = None):
     """
     Ejecuta una compra en Margin gastando BUY_PCT del capital USDC (con tope MAX_USDC_PER_ORDER)
-    y coloca SL (STOP_LOSS_LIMIT) y TP (LIMIT) como órdenes separadas en Margin.
+    y coloca SL (STOP_MARKET preferred) y TP (LIMIT) como órdenes separadas en Margin.
     """
     try:
-        # 1) Market buy using quoteOrderQty so we control USDC spent
+        # 1) Market buy using quoteOrderQty so we control USDC spent (with fallback to quantity)
         lot = get_lot_info(symbol)
         if not lot:
             print(f"⚠️ No lot info for {symbol}")
@@ -216,7 +217,7 @@ def execute_buy_margin(symbol: str, entry_price_from_alert: float = None, sl_fro
         # Before trading: cancel any open margin orders for the symbol (important)
         cancel_margin_open_orders(symbol)
 
-        # Place market buy on margin: use quoteOrderQty param
+        # Try market buy with quoteOrderQty; if it fails, fallback to quantity-based
         params_buy = {
             "symbol": symbol,
             "side": "BUY",
@@ -224,7 +225,31 @@ def execute_buy_margin(symbol: str, entry_price_from_alert: float = None, sl_fro
             "quoteOrderQty": quote_qty_str,
             "timestamp": int(time.time() * 1000),
         }
-        buy_resp = send_signed_request("POST", "/sapi/v1/margin/order", params_buy)
+        buy_resp = None
+        try:
+            buy_resp = send_signed_request("POST", "/sapi/v1/margin/order", params_buy)
+        except Exception as e_buy:
+            # fallback: compute quantity from estimated price and use quantity param
+            print(f"⚠️ quoteOrderQty buy failed ({e_buy}), attempting quantity-based fallback.")
+            try:
+                # compute approximate qty and floor to step
+                raw_qty = (Decimal(str(usdc_to_use)) / Decimal(str(entry_price)))
+                qty_str = floor_to_step_str(float(raw_qty), lot["stepSize_str"])
+                if float(qty_str) < lot["minQty"]:
+                    print(f"⚠️ Fallback qty {qty_str} < minQty {lot['minQty']} for {symbol}; aborting buy.")
+                    return {"error": "qty_too_small_fallback"}
+                params_buy2 = {
+                    "symbol": symbol,
+                    "side": "BUY",
+                    "type": "MARKET",
+                    "quantity": qty_str,
+                    "timestamp": int(time.time() * 1000),
+                }
+                buy_resp = send_signed_request("POST", "/sapi/v1/margin/order", params_buy2)
+            except Exception as e_buy2:
+                print(f"❌ Both quoteOrderQty and quantity-based buys failed: {e_buy2}")
+                return {"error": "buy_failed", "details": str(e_buy2)}
+
         executed_qty = float(buy_resp.get("executedQty", "0"))
         executed_quote = float(buy_resp.get("cummulativeQuoteQty", "0") or 0)
         print(f"✅ Margin BUY executed {symbol}: executedQty={executed_qty}, spent≈{executed_quote}")
@@ -260,9 +285,9 @@ def execute_buy_margin(symbol: str, entry_price_from_alert: float = None, sl_fro
 
         print("🔧 Preparing SL/TP (Margin separate orders):", {"oco_qty": oco_qty_str, "tp_adj": tp_adj, "sl_adj": sl_adj, "stop_limit_adj": stop_limit_adj})
 
-        # 3) Place SL (stop-limit) and TP (limit) as separate margin orders.
-        # Try to place TP then SL; if either fails, log and continue (we will attempt fallbacks).
+        # 3) Place TP (LIMIT) first (safer) then SL as STOP_MARKET preferred; fallback to STOP_LOSS_LIMIT if necessary.
         results = {"order": buy_resp}
+        # TP
         try:
             params_tp = {
                 "symbol": symbol,
@@ -280,23 +305,39 @@ def execute_buy_margin(symbol: str, entry_price_from_alert: float = None, sl_fro
             print(f"❌ Failed to place margin TP: {e_tp}")
             results["tp_error"] = str(e_tp)
 
+        # SL: try STOP_MARKET first (less param-sensitive)
         try:
-            params_sl = {
+            params_sl_sm = {
                 "symbol": symbol,
                 "side": "SELL",
-                "type": "STOP_LOSS_LIMIT",
+                "type": "STOP_MARKET",
                 "quantity": oco_qty_str,
-                "price": stop_limit_adj,
                 "stopPrice": sl_adj,
-                "timeInForce": "GTC",
                 "timestamp": int(time.time() * 1000)
             }
-            sl_resp = send_signed_request("POST", "/sapi/v1/margin/order", params_sl)
+            sl_resp = send_signed_request("POST", "/sapi/v1/margin/order", params_sl_sm)
             results["sl"] = sl_resp
-            print(f"✅ Margin SL placed: stopPrice={sl_adj}, orderId={sl_resp.get('orderId')}")
-        except Exception as e_sl:
-            print(f"❌ Failed to place margin SL: {e_sl}")
-            results["sl_error"] = str(e_sl)
+            print(f"✅ Margin STOP_MARKET SL placed: stopPrice={sl_adj}, orderId={sl_resp.get('orderId')}")
+        except Exception as e_sm:
+            print(f"⚠️ STOP_MARKET SL failed: {e_sm} — attempting STOP_LOSS_LIMIT fallback.")
+            # fallback: STOP_LOSS_LIMIT (existing approach)
+            try:
+                params_sl = {
+                    "symbol": symbol,
+                    "side": "SELL",
+                    "type": "STOP_LOSS_LIMIT",
+                    "quantity": oco_qty_str,
+                    "price": stop_limit_adj,
+                    "stopPrice": sl_adj,
+                    "timeInForce": "GTC",
+                    "timestamp": int(time.time() * 1000)
+                }
+                sl_resp2 = send_signed_request("POST", "/sapi/v1/margin/order", params_sl)
+                results["sl"] = sl_resp2
+                print(f"✅ Margin STOP_LOSS_LIMIT SL placed: stopPrice={sl_adj}, orderId={sl_resp2.get('orderId')}")
+            except Exception as e_sl:
+                print(f"❌ Failed to place margin SL (both STOP_MARKET and STOP_LOSS_LIMIT): {e_sl}")
+                results["sl_error"] = str(e_sl)
 
         return results
 
