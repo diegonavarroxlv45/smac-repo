@@ -377,7 +377,7 @@ def webhook():
             pass
 
         if side == "SELL":
-            print(f"🔎 SELL signal received for {symbol} — closing margin position if any.")
+            print(f"🔴 SELL signal received for {symbol} — closing margin position if any.")
             resp = close_position_margin(symbol)
             return jsonify({"status": "SELL processed", "closed": resp}), 200
 
