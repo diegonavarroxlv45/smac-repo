@@ -133,6 +133,7 @@ def cancel_margin_open_orders(symbol: str):
         send_signed_request("DELETE", "/sapi/v1/margin/openOrders", params)
         print(f"🗑 Cancelled openOrders for {symbol}")
     except Exception as e:
+        # seguimos adelante aunque falle cancelar órdenes (no queremos que un fallo bloquee todo)
         print(f"⚠️ Could not cancel openOrders for {symbol}: {e}")
 
 # --- CLOSE (para cerrar posiciones) ---
@@ -171,6 +172,9 @@ def execute_long_margin(symbol: str, entry_price=None, sl=None, tp=None):
     try:
         print(f"🟢 LONG signal for {symbol}")
         lot = get_lot_info(symbol)
+        if not lot:
+            print(f"⚠️ No lot info for {symbol}, aborting LONG.")
+            return {"error": "no_lot"}
         entry_price = float(entry_price or get_price(symbol))
         usdc_balance = get_margin_balance("USDC")
         if usdc_balance < 1:
@@ -200,6 +204,9 @@ def execute_short_margin(symbol: str, entry_price=None, sl=None, tp=None):
         print(f"🔴 SHORT signal for {symbol}")
         base_asset, quote = detect_base_asset(symbol)
         lot = get_lot_info(symbol)
+        if not lot:
+            print(f"⚠️ No lot info for {symbol}, aborting SHORT.")
+            return {"error": "no_lot"}
         entry_price = float(entry_price or get_price(symbol))
         usdc_balance = get_margin_balance("USDC")
         usdc_to_use = min(usdc_balance * BUY_PCT, MAX_USDC_PER_ORDER)
@@ -208,7 +215,11 @@ def execute_short_margin(symbol: str, entry_price=None, sl=None, tp=None):
         if float(qty_str) < lot["minQty"]:
             print(f"⚠️ Qty {qty_str} < minQty {lot['minQty']}")
             return None
-        margin_borrow(base_asset, float(qty_str))
+        # intentar pedir prestado; si falla, lo registramos y abortamos la short (más seguro)
+        borrow_resp = margin_borrow(base_asset, float(qty_str))
+        if not borrow_resp:
+            print(f"⚠️ Borrow failed for {base_asset}; aborting SHORT for {symbol}")
+            return {"error": "borrow_failed"}
         cancel_margin_open_orders(symbol)
         params_sell = {
             "symbol": symbol,
@@ -229,13 +240,53 @@ def execute_short_margin(symbol: str, entry_price=None, sl=None, tp=None):
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
-        data = request.get_json(force=True)
-        symbol = data.get("symbol", "").upper()
-        side = data.get("side", "").upper()
+        # Intentamos parsear JSON *de forma segura* (no forzamos excepción si no es JSON).
+        data = None
+        try:
+            # silent=True evita que Flask lance BadRequest al no ser JSON
+            data = request.get_json(silent=True)
+        except Exception as e_inner:
+            # shouldn't happen with silent=True, pero lo capturamos
+            print(f"⚠️ get_json inner exception: {e_inner}")
+
+        # Si no es JSON, podríamos recibir form-encoded; manejamos también ese caso:
+        if data is None:
+            if request.form:
+                # convertir ImmutableMultiDict a dict
+                data = request.form.to_dict()
+                print("ℹ️ Received form-encoded webhook payload; converted to dict.")
+            else:
+                # Body vacío o no JSON -> ignorar pero responder 200 para evitar reintentos agresivos
+                # Logueamos para diagnóstico pero no disparamos operaciones.
+                raw = (request.data or b"").decode(errors="replace")
+                print(f"⚠️ Ignored non-JSON or empty webhook payload. Raw body: {raw!r}")
+                return jsonify({"status": "ignored", "reason": "non-json-or-empty-payload"}), 200
+
+        # Normalizar campos
+        symbol = (data.get("symbol") or "").strip().upper()
+        side = (data.get("side") or "").strip().upper()
         entry = data.get("entry_price")
         sl = data.get("sl")
         tp = data.get("tp")
 
+        # Validaciones: símbolo y side son obligatorios para procesar
+        if not symbol or not side:
+            print(f"⚠️ Ignored webhook: missing symbol or side. data={data}")
+            return jsonify({"status": "ignored", "reason": "missing_symbol_or_side"}), 200
+
+        # Sólo aceptar sides conocidos (evitamos ejecutar por strings raros)
+        allowed_sides = {"BUY", "SELL", "CLOSE_LONG", "CLOSE_SHORT", "LONG", "SHORT"}
+        if side not in allowed_sides:
+            print(f"⚠️ Ignored webhook: unsupported side={side}. data={data}")
+            return jsonify({"status": "ignored", "reason": "unsupported_side"}), 200
+
+        # Mapear alias: aceptar "LONG"/"SHORT" como equivalentes
+        if side == "LONG":
+            side = "BUY"
+        elif side == "SHORT":
+            side = "SELL"
+
+        # Ejecutar acción
         if side == "BUY":
             resp = execute_long_margin(symbol, entry_price=entry, sl=sl, tp=tp)
             return jsonify({"status": "LONG executed", "resp": resp}), 200
@@ -249,8 +300,12 @@ def webhook():
             resp = close_position_margin(symbol, side="BUY")
             return jsonify({"status": "CLOSE_SHORT done", "resp": resp}), 200
         else:
-            return jsonify({"status": "ignored", "side": side}), 200
+            # No debería llegar aquí por el filtro anterior, pero lo dejamos por seguridad.
+            print(f"⚠️ Ignored webhook: reached fallback for side={side}, data={data}")
+            return jsonify({"status": "ignored", "reason": "fallback"}), 200
+
     except Exception as e:
+        # Cualquier excepción imprevista se registra y devolvemos 500 (útil para debugging)
         print(f"❌ Webhook error: {e}")
         return jsonify({"error": str(e)}), 500
 
