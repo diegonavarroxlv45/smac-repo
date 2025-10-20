@@ -4,7 +4,7 @@ import hmac
 import hashlib
 import requests
 import functools
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from flask import Flask, request, jsonify
 
 # ====== SETTINGS ======
@@ -39,7 +39,10 @@ def _request_with_retries(method: str, url: str, **kwargs):
         try:
             resp = requests.request(method, url, timeout=10, **kwargs)
             if resp.status_code == 200:
-                return resp.json()
+                try:
+                    return resp.json()
+                except Exception:
+                    return resp.text
             else:
                 print(f"⚠️ Attempt {i+1} failed: {resp.text}")
         except Exception as e:
@@ -49,6 +52,9 @@ def _request_with_retries(method: str, url: str, **kwargs):
 
 
 def send_signed_request(http_method: str, path: str, payload: dict):
+    # ensure timestamp
+    if "timestamp" not in payload:
+        payload["timestamp"] = _now_ms()
     query_string = "&".join([f"{k}={v}" for k, v in payload.items()])
     signature = hmac.new(BINANCE_API_SECRET.encode(), query_string.encode(), hashlib.sha256).hexdigest()
     url = f"{BASE_URL}{path}?{query_string}&signature={signature}"
@@ -56,12 +62,36 @@ def send_signed_request(http_method: str, path: str, payload: dict):
     return _request_with_retries(http_method, url, headers=headers)
 
 
-def floor_to_step_str(value, step):
-    d = Decimal(str(step))
-    return str(Decimal(str(value)).quantize(d, rounding=ROUND_DOWN))
+def floor_to_step_str(value, step_str):
+    """
+    Redondea hacia abajo al múltiplo de step_str, devuelve string con decimales del step.
+    """
+    step = Decimal(str(step_str))
+    v = Decimal(str(value))
+    # num of steps = floor(v / step) * step
+    n = (v // step) * step
+    decimals = -step.as_tuple().exponent if step.as_tuple().exponent < 0 else 0
+    q = n.quantize(Decimal(1).scaleb(-decimals), rounding=ROUND_DOWN)
+    return format(q, f".{decimals}f")
 
 
-# ====== BALANCE FUNCTIONS ======
+def ceil_to_step_str(value, step_str):
+    """
+    Redondea hacia arriba al múltiplo de step_str, devuelve string con decimales del step.
+    """
+    step = Decimal(str(step_str))
+    v = Decimal(str(value))
+    div = (v / step)
+    n = div.to_integral_value(rounding=ROUND_DOWN)
+    if (div - n) > Decimal("0"):
+        n = n + 1
+    d = n * step
+    decimals = -step.as_tuple().exponent if step.as_tuple().exponent < 0 else 0
+    q = d.quantize(Decimal(1).scaleb(-decimals))
+    return format(q, f".{decimals}f")
+
+
+# ====== BALANCE / SYMBOL FUNCTIONS ======
 def get_balance_margin(asset="USDC") -> float:
     ts = _now_ms()
     params = {"timestamp": ts}
@@ -77,123 +107,223 @@ def get_balance_margin(asset="USDC") -> float:
 
 
 def get_symbol_lot(symbol):
+    """
+    Devuelve información útil: stepSize_str, tickSize_str, minQty, minNotional.
+    """
     data = _request_with_retries("GET", f"{BASE_URL}/api/v3/exchangeInfo")
     for s in data["symbols"]:
         if s["symbol"] == symbol:
-            fs = next(f for f in s["filters"] if f["filterType"] == "LOT_SIZE")
-            ts = next(f for f in s["filters"] if f["filterType"] == "PRICE_FILTER")
+            fs = next((f for f in s["filters"] if f["filterType"] == "LOT_SIZE"), None)
+            ts = next((f for f in s["filters"] if f["filterType"] == "PRICE_FILTER"), None)
+            mnf = next((f for f in s["filters"] if f["filterType"] in ("MIN_NOTIONAL", "NOTIONAL")), None)
+            if not fs or not ts:
+                raise Exception(f"Missing LOT_SIZE or PRICE_FILTER for {symbol}")
+            minNotional = float(mnf.get("minNotional") or mnf.get("notional") or 0.0) if mnf else 0.0
             return {
-                "stepSize": float(fs["stepSize"]),
                 "stepSize_str": fs["stepSize"],
-                "tickSize": float(ts["tickSize"]),
+                "stepSize": float(fs["stepSize"]),
+                "minQty": float(fs.get("minQty", 0.0)),
                 "tickSize_str": ts["tickSize"],
+                "tickSize": float(ts["tickSize"]),
+                "minNotional": minNotional,
             }
     raise Exception(f"Symbol not found: {symbol}")
+
+
+# ====== PRICE ADJUST (tickSize) ======
+def format_price_to_tick(price: float, tick_size_str: str, rounding=ROUND_DOWN) -> str:
+    """
+    Ajusta price a múltiplos de tick_size. rounding puede ser ROUND_DOWN o ROUND_UP.
+    Devuelve string con decimales correctos.
+    """
+    d_tick = Decimal(str(tick_size_str))
+    p = Decimal(str(price)).quantize(d_tick, rounding=rounding)
+    decimals = -d_tick.as_tuple().exponent if d_tick.as_tuple().exponent < 0 else 0
+    return f"{p:.{decimals}f}"
 
 
 # ====== MAIN FUNCTIONS ======
 def execute_long_margin(symbol):
     lot = get_symbol_lot(symbol)
     balance_usdc = get_balance_margin("USDC")
-    qty_quote = min(balance_usdc * BUY_PCT, MAX_USDC_PER_ORDER)
+    usdc_to_use = min(balance_usdc * BUY_PCT, MAX_USDC_PER_ORDER)
+    quote_order_qty = format(Decimal(str(usdc_to_use)).quantize(Decimal("0.00000001")), "f")
 
     params = {
         "symbol": symbol,
         "side": "BUY",
         "type": "MARKET",
-        "quoteOrderQty": floor_to_step_str(qty_quote, lot["tickSize_str"]),
+        "quoteOrderQty": quote_order_qty,
         "timestamp": _now_ms(),
     }
 
     if DRY_RUN:
-        print(f"[DRY_RUN] Margin LONG {symbol}: quoteOrderQty={qty_quote}")
-        return
+        print(f"[DRY_RUN] Margin LONG {symbol}: quoteOrderQty={quote_order_qty}")
+        return {"dry_run": True}
 
     resp = send_signed_request("POST", "/sapi/v1/margin/order", params)
 
-    if "fills" in resp:
+    # calcular executedQty y precio efectivo si hay fills
+    executed_qty = 0.0
+    entry_price = None
+    if isinstance(resp, dict) and "fills" in resp:
         executed_qty = sum(float(f["qty"]) for f in resp["fills"])
         spent_quote = sum(float(f["price"]) * float(f["qty"]) for f in resp["fills"])
-        entry_price = spent_quote / executed_qty
-        print(f"✅ Margin BUY executed {symbol}: executedQty={executed_qty}, spent≈{spent_quote}")
+        entry_price = (spent_quote / executed_qty) if executed_qty else None
+    # fallback: si la respuesta trae executedQty directamente
+    if not entry_price and isinstance(resp, dict):
+        try:
+            executed_qty = float(resp.get("executedQty", 0) or 0)
+            cumm = float(resp.get("cummulativeQuoteQty", 0) or 0)
+            if executed_qty:
+                entry_price = cumm / executed_qty
+        except Exception:
+            pass
 
-        # Place SL & TP
-        if executed_qty > 0:
-            place_sl_tp_margin(symbol, "BUY", entry_price, executed_qty, lot)
+    print(f"✅ Margin BUY executed {symbol}: executedQty={executed_qty}, spent≈{(entry_price * executed_qty) if (entry_price and executed_qty) else 'unknown'}")
+
+    if executed_qty > 0 and entry_price:
+        place_sl_tp_margin(symbol, "BUY", entry_price, executed_qty, lot)
+
+    return {"order": resp}
 
 
 def execute_short_margin(symbol):
+    """
+    Calcular qty a pedir prestado en base a usdc disponible, validar minQty/minNotional,
+    pedir prestado esa cantidad, y venderla en MARKET.
+    """
     lot = get_symbol_lot(symbol)
-    borrowed_qty = 0.0
-    balance_base = get_balance_margin(symbol.replace("USDC", ""))
+    entry_price = None
 
-    if balance_base <= 0:
-        borrow_params = {"asset": symbol.replace("USDC", ""), "amount": 0.002, "timestamp": _now_ms()}
-        send_signed_request("POST", "/sapi/v1/margin/loan", borrow_params)
-        borrowed_qty = 0.002
-        print(f"📥 Borrowed {borrowed_qty} {symbol.replace('USDC', '')}")
+    # PRICING: si el webhook aporta entry_price podríamos usarla, pero mantenemos
+    # la idea de obtener precio desde mercado si se necesita. Aquí asumimos usar market fills.
+    balance_usdc = get_balance_margin("USDC")
+    usdc_to_use = min(balance_usdc * BUY_PCT, MAX_USDC_PER_ORDER)
 
-    qty_str = floor_to_step_str(borrowed_qty, lot["stepSize_str"])
-    params = {
-        "symbol": symbol,
-        "side": "SELL",
-        "type": "MARKET",
-        "quantity": qty_str,
-        "timestamp": _now_ms(),
-    }
+    # qty objetivo = usdc_to_use / price_estimate -> necesitamos un price estimate
+    # mejor usar get ticker price:
+    try:
+        r = _request_with_retries("GET", f"{BASE_URL}/api/v3/ticker/price", params={"symbol": symbol})
+        price_est = float(r.get("price", 0))
+    except Exception as e:
+        print(f"⚠️ Could not fetch price for {symbol}: {e}")
+        return {"error": "price_fetch_failed"}
+
+    if price_est <= 0:
+        print("⚠️ Price estimate invalid, aborting short.")
+        return {"error": "invalid_price_est"}
+
+    raw_qty = Decimal(str(usdc_to_use)) / Decimal(str(price_est))
+    qty_str = floor_to_step_str(float(raw_qty), lot["stepSize_str"])
+    qty = float(Decimal(qty_str))
+
+    # validations
+    if qty <= 0 or qty < lot.get("minQty", 0.0):
+        msg = f"Qty {qty_str} < minQty {lot.get('minQty')}"
+        print("⚠️", msg)
+        return {"error": "qty_too_small", "detail": msg}
+
+    if (qty * price_est) < lot.get("minNotional", 0.0):
+        msg = f"Notional {qty * price_est:.8f} < minNotional {lot.get('minNotional')}"
+        print("⚠️", msg)
+        return {"error": "notional_too_small", "detail": msg}
+
+    # pedir prestado exactamente qty
+    borrow_params = {"asset": symbol.replace("USDC", ""), "amount": format(Decimal(str(qty)), "f"), "timestamp": _now_ms()}
+    if DRY_RUN:
+        print(f"[DRY_RUN] Borrow {borrow_params}")
+        borrowed_qty = qty
+    else:
+        borrow_resp = send_signed_request("POST", "/sapi/v1/margin/loan", borrow_params)
+        # intentar obtener cantidad prestada desde la respuesta
+        borrowed_qty = None
+        if isinstance(borrow_resp, dict):
+            borrowed_qty = float(borrow_resp.get("amount") or borrow_resp.get("qty") or qty)
+        else:
+            borrowed_qty = qty
+
+    print(f"📥 Borrowed {borrowed_qty} {symbol.replace('USDC','')} (requested {qty})")
+
+    # cancelar open orders y enviar market sell
+    cancel_params = {"symbol": symbol, "timestamp": _now_ms()}
+    try:
+        send_signed_request("DELETE", "/sapi/v1/margin/openOrders", cancel_params)
+    except Exception as e:
+        print(f"⚠️ Could not cancel openOrders for {symbol}: {e}")
+
+    qty_str_final = floor_to_step_str(float(borrowed_qty), lot["stepSize_str"])
+    if float(qty_str_final) < lot.get("minQty", 0.0):
+        msg = f"After borrow qty {qty_str_final} < minQty {lot.get('minQty')}"
+        print("⚠️", msg)
+        return {"error": "borrowed_qty_too_small", "detail": msg}
+
+    params = {"symbol": symbol, "side": "SELL", "type": "MARKET", "quantity": qty_str_final, "timestamp": _now_ms()}
 
     if DRY_RUN:
-        print(f"[DRY_RUN] Margin SHORT {symbol}: qty={qty_str}")
-        return
+        print(f"[DRY_RUN] Margin SHORT {symbol}: quantity={qty_str_final}")
+        return {"dry_run": True}
 
     resp = send_signed_request("POST", "/sapi/v1/margin/order", params)
-    entry_price = float(resp.get("price", 0)) or 0.0
-    print(f"✅ SHORT opened {symbol} qty={qty_str}")
 
-    # Place SL & TP
-    if borrowed_qty > 0:
-        place_sl_tp_margin(symbol, "SELL", entry_price, float(qty_str), lot)
+    executed_qty = 0.0
+    entry_price_effective = None
+    if isinstance(resp, dict) and "fills" in resp:
+        executed_qty = sum(float(f["qty"]) for f in resp["fills"])
+        spent_quote = sum(float(f["price"]) * float(f["qty"]) for f in resp["fills"])
+        entry_price_effective = (spent_quote / executed_qty) if executed_qty else None
+    if not entry_price_effective and isinstance(resp, dict):
+        try:
+            executed_qty = float(resp.get("executedQty", 0) or 0)
+            cumm = float(resp.get("cummulativeQuoteQty", 0) or 0)
+            if executed_qty:
+                entry_price_effective = cumm / executed_qty
+        except Exception:
+            pass
 
+    print(f"✅ SHORT opened {symbol} qty={qty_str_final} (executed={executed_qty})")
 
-# ====== PRICE ADJUST (añadido) ======
-def format_price_to_tick(price: float, tick_size_str: str) -> str:
-    """
-    Ajusta el precio al tickSize (redondeando hacia abajo) y devuelve string adecuado
-    para enviar a Binance. Usamos Decimal.quantize con ROUND_DOWN para garantizar
-    que el precio es múltiplo del tickSize.
-    """
-    d_tick = Decimal(str(tick_size_str))
-    p = Decimal(str(price)).quantize(d_tick, rounding=ROUND_DOWN)
-    # Formatear con la cantidad de decimales del tick
-    decimals = -d_tick.as_tuple().exponent if d_tick.as_tuple().exponent < 0 else 0
-    fmt = f"{{0:.{decimals}f}}"
-    return fmt.format(p)
+    if executed_qty > 0 and entry_price_effective:
+        place_sl_tp_margin(symbol, "SELL", entry_price_effective, executed_qty, lot)
+
+    return {"order": resp}
 
 
 # ====== SL/TP FUNCTIONS ======
 def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty: float, lot: dict):
     """
-    Coloca órdenes LIMIT de Stop Loss y Take Profit en margin tras una operación de entrada.
-    Sólo modificado para ajustar precios al tickSize antes de enviar (solución PRICE_FILTER).
+    Coloca SL y TP respetando tickSize y minNotional.
+    - Para LONG: SL ROUND_DOWN (más conservador), TP ROUND_UP (asegurar alcanzar)
+    - Para SHORT: SL ROUND_UP (SL está por encima), TP ROUND_DOWN
+    Saltamos SL/TP si el notional resultante < minNotional.
     """
     try:
         sl_side = "SELL" if side == "BUY" else "BUY"
-        tp_side = sl_side
 
         if side == "BUY":  # LONG
             sl_price = entry_price * STOP_LOSS_PCT
             tp_price = entry_price * TAKE_PROFIT_PCT
+            sl_round = ROUND_DOWN
+            tp_round = ROUND_UP
         else:  # SHORT
             sl_price = entry_price / STOP_LOSS_PCT
             tp_price = entry_price / TAKE_PROFIT_PCT
+            sl_round = ROUND_UP
+            tp_round = ROUND_DOWN
 
-        # --> aquí usamos la función que ajusta al tickSize (evita PRICE_FILTER)
-        sl_price_str = format_price_to_tick(sl_price, lot["tickSize_str"])
-        tp_price_str = format_price_to_tick(tp_price, lot["tickSize_str"])
+        sl_price_str = format_price_to_tick(sl_price, lot["tickSize_str"], rounding=sl_round)
+        tp_price_str = format_price_to_tick(tp_price, lot["tickSize_str"], rounding=tp_round)
 
         qty_str = floor_to_step_str(executed_qty * float(COMMISSION_BUFFER), lot["stepSize_str"])
+        qty_f = float(qty_str)
 
         for label, price_str in [("SL", sl_price_str), ("TP", tp_price_str)]:
+            price_f = float(price_str)
+            notional = price_f * qty_f
+            if notional < lot.get("minNotional", 0.0):
+                print(f"⚠️ Skipping {label} for {symbol}: notional {notional:.8f} < minNotional {lot.get('minNotional')}")
+                continue
+
             params = {
                 "symbol": symbol,
                 "side": sl_side,
@@ -228,13 +358,13 @@ def webhook():
     print(f"📩 Webhook received: {data}")
 
     if side == "BUY":
-        execute_long_margin(symbol)
+        resp = execute_long_margin(symbol)
     elif side == "SELL":
-        execute_short_margin(symbol)
+        resp = execute_short_margin(symbol)
     else:
         return jsonify({"error": "Invalid side"}), 400
 
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "result": resp}), 200
 
 
 # ====== FLASK EXECUTION ======
