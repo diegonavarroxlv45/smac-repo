@@ -1,372 +1,200 @@
 import os
-import time
 import hmac
 import hashlib
+import time
+import json
 import requests
-import functools
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from flask import Flask, request, jsonify
 
-# ====== SETTINGS ======
+app = Flask(__name__)
+
+# === CONFIG ===
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
 BASE_URL = "https://api.binance.com"
+TRADE_URL = BASE_URL + "/api/v3/order"
+EXCHANGE_INFO_URL = BASE_URL + "/api/v3/exchangeInfo"
+ACCOUNT_MARGIN_URL = BASE_URL + "/sapi/v1/margin/account"
+BORROW_URL = BASE_URL + "/sapi/v1/margin/loan"
+REPAY_URL = BASE_URL + "/sapi/v1/margin/repay"
+HEADERS = {"X-MBX-APIKEY": BINANCE_API_KEY}
 
-BUY_PCT = float(os.getenv("BUY_PCT", "0.04"))
-MAX_USDC_PER_ORDER = float(os.getenv("MAX_USDC_PER_ORDER", "100"))
-STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.97"))
-TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", "1.06"))
-COMMISSION_BUFFER = Decimal(os.getenv("COMMISSION_BUFFER", "0.999"))
-DRY_RUN = os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes")
+# Config por defecto si no llega en JSON
+STOP_LOSS_PCT = 0.04
+TAKE_PROFIT_PCT = 0.04
+TRADE_PORTION = 0.05
+DRY_RUN = False
 
-print = functools.partial(print, flush=True)
-app = Flask(__name__)
+# === UTILS ===
 
-
-# ====== AUXILIAR FUNCTIONS ======
-def _now_ms():
-    return int(time.time() * 1000)
-
-
-def sign_params_query(params: dict, secret: str):
+def _sign(params: dict) -> dict:
     query = "&".join([f"{k}={v}" for k, v in params.items()])
-    signature = hmac.new(secret.encode(), query.encode(), hashlib.sha256).hexdigest()
-    return query, signature
+    signature = hmac.new(BINANCE_API_SECRET.encode(), query.encode(), hashlib.sha256).hexdigest()
+    params["signature"] = signature
+    return params
 
 
-def _request_with_retries(method: str, url: str, **kwargs):
-    for i in range(3):
+def _request_with_retries(method, url, headers=None, params=None, data=None, max_retries=3):
+    for attempt in range(max_retries):
         try:
-            resp = requests.request(method, url, timeout=10, **kwargs)
-            if resp.status_code == 200:
-                try:
-                    return resp.json()
-                except Exception:
-                    return resp.text
+            r = requests.request(method, url, headers=headers, params=params, data=data, timeout=10)
+            if r.status_code == 200:
+                return r.json()
             else:
-                print(f"⚠️ Attempt {i+1} failed: {resp.text}")
+                print(f"⚠️ Attempt {attempt+1} failed: {r.text}")
         except Exception as e:
-            print(f"⚠️ Request error: {e}")
+            print(f"⚠️ Attempt {attempt+1} exception: {e}")
         time.sleep(1)
     raise Exception("❌ Request failed after retries")
 
 
-def send_signed_request(http_method: str, path: str, payload: dict):
-    # ensure timestamp
-    if "timestamp" not in payload:
-        payload["timestamp"] = _now_ms()
-    query_string = "&".join([f"{k}={v}" for k, v in payload.items()])
-    signature = hmac.new(BINANCE_API_SECRET.encode(), query_string.encode(), hashlib.sha256).hexdigest()
-    url = f"{BASE_URL}{path}?{query_string}&signature={signature}"
-    headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
-    return _request_with_retries(http_method, url, headers=headers)
+def get_lot_size_info(symbol):
+    data = _request_with_retries("GET", EXCHANGE_INFO_URL, headers=HEADERS, params={"symbol": symbol})
+    filters = {f["filterType"]: f for f in data["symbols"][0]["filters"]}
+    lot_size = filters["LOT_SIZE"]
+    price_filter = filters["PRICE_FILTER"]
+    return {
+        "stepSize_str": lot_size["stepSize"],
+        "tickSize_str": price_filter["tickSize"]
+    }
 
 
-def floor_to_step_str(value, step_str):
-    """
-    Redondea hacia abajo al múltiplo de step_str, devuelve string con decimales del step.
-    """
-    step = Decimal(str(step_str))
-    v = Decimal(str(value))
-    # num of steps = floor(v / step) * step
-    n = (v // step) * step
+def floor_to_step_str(qty: float, step_size_str: str) -> str:
+    step = Decimal(step_size_str)
+    q = Decimal(str(qty))
+    steps = (q / step).to_integral_value(rounding=ROUND_DOWN)
+    adjusted = steps * step
     decimals = -step.as_tuple().exponent if step.as_tuple().exponent < 0 else 0
-    q = n.quantize(Decimal(1).scaleb(-decimals), rounding=ROUND_DOWN)
-    return format(q, f".{decimals}f")
+    return f"{adjusted:.{decimals}f}"
 
 
-def ceil_to_step_str(value, step_str):
+# === ✅ NUEVA FUNCIÓN MEJORADA ===
+def format_price_to_tick(price: float, tick_size_str: str, rounding=ROUND_DOWN) -> str:
     """
-    Redondea hacia arriba al múltiplo de step_str, devuelve string con decimales del step.
+    Ajusta price a múltiplos exactos de tick_size. rounding puede ser ROUND_DOWN o ROUND_UP.
+    Devuelve string con los decimales correctos exigidos por Binance.
     """
-    step = Decimal(str(step_str))
-    v = Decimal(str(value))
-    div = (v / step)
-    n = div.to_integral_value(rounding=ROUND_DOWN)
-    if (div - n) > Decimal("0"):
-        n = n + 1
-    d = n * step
-    decimals = -step.as_tuple().exponent if step.as_tuple().exponent < 0 else 0
-    q = d.quantize(Decimal(1).scaleb(-decimals))
-    return format(q, f".{decimals}f")
+    d_tick = Decimal(str(tick_size_str))
+    p = Decimal(str(price))
+
+    # Truncar o elevar al múltiplo exacto más cercano permitido
+    steps = (p / d_tick).to_integral_value(rounding=rounding)
+    adjusted = steps * d_tick
+
+    decimals = -d_tick.as_tuple().exponent if d_tick.as_tuple().exponent < 0 else 0
+    return f"{adjusted:.{decimals}f}"
 
 
-# ====== BALANCE / SYMBOL FUNCTIONS ======
-def get_balance_margin(asset="USDC") -> float:
-    ts = _now_ms()
-    params = {"timestamp": ts}
-    q, sig = sign_params_query(params, BINANCE_API_SECRET)
-    url = f"{BASE_URL}/sapi/v1/margin/account?{q}&signature={sig}"
-    headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
+def get_balance_margin(asset):
     if DRY_RUN:
         print(f"[DRY_RUN] get_balance_margin({asset}) -> simulated 1000")
         return 1000.0
-    data = _request_with_retries("GET", url, headers=headers)
-    bal = next((b for b in data.get("userAssets", []) if b["asset"] == asset), None)
+    params = {"timestamp": int(time.time() * 1000)}
+    signed = _sign(params)
+    data = _request_with_retries("GET", ACCOUNT_MARGIN_URL, headers=HEADERS, params=signed)
+    bal = next((b for b in data["userAssets"] if b["asset"] == asset), None)
     return float(bal["free"]) if bal else 0.0
 
 
-def get_symbol_lot(symbol):
-    """
-    Devuelve información útil: stepSize_str, tickSize_str, minQty, minNotional.
-    """
-    data = _request_with_retries("GET", f"{BASE_URL}/api/v3/exchangeInfo")
-    for s in data["symbols"]:
-        if s["symbol"] == symbol:
-            fs = next((f for f in s["filters"] if f["filterType"] == "LOT_SIZE"), None)
-            ts = next((f for f in s["filters"] if f["filterType"] == "PRICE_FILTER"), None)
-            mnf = next((f for f in s["filters"] if f["filterType"] in ("MIN_NOTIONAL", "NOTIONAL")), None)
-            if not fs or not ts:
-                raise Exception(f"Missing LOT_SIZE or PRICE_FILTER for {symbol}")
-            minNotional = float(mnf.get("minNotional") or mnf.get("notional") or 0.0) if mnf else 0.0
-            return {
-                "stepSize_str": fs["stepSize"],
-                "stepSize": float(fs["stepSize"]),
-                "minQty": float(fs.get("minQty", 0.0)),
-                "tickSize_str": ts["tickSize"],
-                "tickSize": float(ts["tickSize"]),
-                "minNotional": minNotional,
-            }
-    raise Exception(f"Symbol not found: {symbol}")
+def borrow_asset(asset, amount):
+    if DRY_RUN:
+        print(f"[DRY_RUN] borrow_asset({asset}, {amount}) -> simulated")
+        return True
+    params = {"asset": asset, "amount": amount, "timestamp": int(time.time() * 1000)}
+    signed = _sign(params)
+    _request_with_retries("POST", BORROW_URL, headers=HEADERS, params=signed)
+    print(f"📥 Borrowed {amount} {asset}")
+    return True
 
 
-# ====== PRICE ADJUST (tickSize) ======
-def format_price_to_tick(price: float, tick_size_str: str, rounding=ROUND_DOWN) -> str:
-    """
-    Ajusta price a múltiplos de tick_size. rounding puede ser ROUND_DOWN o ROUND_UP.
-    Devuelve string con decimales correctos.
-    """
-    d_tick = Decimal(str(tick_size_str))
-    p = Decimal(str(price)).quantize(d_tick, rounding=rounding)
-    decimals = -d_tick.as_tuple().exponent if d_tick.as_tuple().exponent < 0 else 0
-    return f"{p:.{decimals}f}"
-
-
-# ====== MAIN FUNCTIONS ======
-def execute_long_margin(symbol):
-    lot = get_symbol_lot(symbol)
-    balance_usdc = get_balance_margin("USDC")
-    usdc_to_use = min(balance_usdc * BUY_PCT, MAX_USDC_PER_ORDER)
-    quote_order_qty = format(Decimal(str(usdc_to_use)).quantize(Decimal("0.00000001")), "f")
-
+def place_order_margin(symbol, side, quantity, price=None):
+    if DRY_RUN:
+        print(f"[DRY_RUN] place_order_margin({symbol}, {side}, qty={quantity}, price={price}) -> simulated")
+        return {"orderId": 12345}
     params = {
         "symbol": symbol,
-        "side": "BUY",
-        "type": "MARKET",
-        "quoteOrderQty": quote_order_qty,
-        "timestamp": _now_ms(),
+        "side": side,
+        "type": "MARKET" if not price else "LIMIT",
+        "quantity": quantity,
+        "timestamp": int(time.time() * 1000),
     }
+    if price:
+        params["price"] = price
+        params["timeInForce"] = "GTC"
+
+    signed = _sign(params)
+    return _request_with_retries("POST", TRADE_URL, headers=HEADERS, params=signed)
+
+
+def place_sl_tp_margin(symbol, entry_side, entry_price, sl_price, tp_price, qty, lot):
+    opp_side = "SELL" if entry_side == "BUY" else "BUY"
+
+    sl_round = ROUND_DOWN if opp_side == "SELL" else ROUND_UP
+    tp_round = ROUND_UP if opp_side == "SELL" else ROUND_DOWN
+
+    sl_price_str = format_price_to_tick(sl_price, lot["tickSize_str"], rounding=sl_round)
+    tp_price_str = format_price_to_tick(tp_price, lot["tickSize_str"], rounding=tp_round)
+    qty_str = floor_to_step_str(qty, lot["stepSize_str"])
 
     if DRY_RUN:
-        print(f"[DRY_RUN] Margin LONG {symbol}: quoteOrderQty={quote_order_qty}")
-        return {"dry_run": True}
+        print(f"[DRY_RUN] SL/TP {symbol} {opp_side} sl={sl_price_str} tp={tp_price_str} qty={qty_str}")
+        return
 
-    resp = send_signed_request("POST", "/sapi/v1/margin/order", params)
-
-    # calcular executedQty y precio efectivo si hay fills
-    executed_qty = 0.0
-    entry_price = None
-    if isinstance(resp, dict) and "fills" in resp:
-        executed_qty = sum(float(f["qty"]) for f in resp["fills"])
-        spent_quote = sum(float(f["price"]) * float(f["qty"]) for f in resp["fills"])
-        entry_price = (spent_quote / executed_qty) if executed_qty else None
-    # fallback: si la respuesta trae executedQty directamente
-    if not entry_price and isinstance(resp, dict):
-        try:
-            executed_qty = float(resp.get("executedQty", 0) or 0)
-            cumm = float(resp.get("cummulativeQuoteQty", 0) or 0)
-            if executed_qty:
-                entry_price = cumm / executed_qty
-        except Exception:
-            pass
-
-    print(f"✅ Margin BUY executed {symbol}: executedQty={executed_qty}, spent≈{(entry_price * executed_qty) if (entry_price and executed_qty) else 'unknown'}")
-
-    if executed_qty > 0 and entry_price:
-        place_sl_tp_margin(symbol, "BUY", entry_price, executed_qty, lot)
-
-    return {"order": resp}
+    for label, p in [("SL", sl_price_str), ("TP", tp_price_str)]:
+        params = {
+            "symbol": symbol,
+            "side": opp_side,
+            "type": "LIMIT",
+            "price": p,
+            "quantity": qty_str,
+            "timeInForce": "GTC",
+            "timestamp": int(time.time() * 1000),
+        }
+        signed = _sign(params)
+        _request_with_retries("POST", TRADE_URL, headers=HEADERS, params=signed)
+        print(f"✅ {label} {symbol} @ {p} placed successfully.")
 
 
-def execute_short_margin(symbol):
-    """
-    Calcular qty a pedir prestado en base a usdc disponible, validar minQty/minNotional,
-    pedir prestado esa cantidad, y venderla en MARKET.
-    """
-    lot = get_symbol_lot(symbol)
-    entry_price = None
-
-    # PRICING: si el webhook aporta entry_price podríamos usarla, pero mantenemos
-    # la idea de obtener precio desde mercado si se necesita. Aquí asumimos usar market fills.
-    balance_usdc = get_balance_margin("USDC")
-    usdc_to_use = min(balance_usdc * BUY_PCT, MAX_USDC_PER_ORDER)
-
-    # qty objetivo = usdc_to_use / price_estimate -> necesitamos un price estimate
-    # mejor usar get ticker price:
-    try:
-        r = _request_with_retries("GET", f"{BASE_URL}/api/v3/ticker/price", params={"symbol": symbol})
-        price_est = float(r.get("price", 0))
-    except Exception as e:
-        print(f"⚠️ Could not fetch price for {symbol}: {e}")
-        return {"error": "price_fetch_failed"}
-
-    if price_est <= 0:
-        print("⚠️ Price estimate invalid, aborting short.")
-        return {"error": "invalid_price_est"}
-
-    raw_qty = Decimal(str(usdc_to_use)) / Decimal(str(price_est))
-    qty_str = floor_to_step_str(float(raw_qty), lot["stepSize_str"])
-    qty = float(Decimal(qty_str))
-
-    # validations
-    if qty <= 0 or qty < lot.get("minQty", 0.0):
-        msg = f"Qty {qty_str} < minQty {lot.get('minQty')}"
-        print("⚠️", msg)
-        return {"error": "qty_too_small", "detail": msg}
-
-    if (qty * price_est) < lot.get("minNotional", 0.0):
-        msg = f"Notional {qty * price_est:.8f} < minNotional {lot.get('minNotional')}"
-        print("⚠️", msg)
-        return {"error": "notional_too_small", "detail": msg}
-
-    # pedir prestado exactamente qty
-    borrow_params = {"asset": symbol.replace("USDC", ""), "amount": format(Decimal(str(qty)), "f"), "timestamp": _now_ms()}
-    if DRY_RUN:
-        print(f"[DRY_RUN] Borrow {borrow_params}")
-        borrowed_qty = qty
-    else:
-        borrow_resp = send_signed_request("POST", "/sapi/v1/margin/loan", borrow_params)
-        # intentar obtener cantidad prestada desde la respuesta
-        borrowed_qty = None
-        if isinstance(borrow_resp, dict):
-            borrowed_qty = float(borrow_resp.get("amount") or borrow_resp.get("qty") or qty)
-        else:
-            borrowed_qty = qty
-
-    print(f"📥 Borrowed {borrowed_qty} {symbol.replace('USDC','')} (requested {qty})")
-
-    # cancelar open orders y enviar market sell
-    cancel_params = {"symbol": symbol, "timestamp": _now_ms()}
-    try:
-        send_signed_request("DELETE", "/sapi/v1/margin/openOrders", cancel_params)
-    except Exception as e:
-        print(f"⚠️ Could not cancel openOrders for {symbol}: {e}")
-
-    qty_str_final = floor_to_step_str(float(borrowed_qty), lot["stepSize_str"])
-    if float(qty_str_final) < lot.get("minQty", 0.0):
-        msg = f"After borrow qty {qty_str_final} < minQty {lot.get('minQty')}"
-        print("⚠️", msg)
-        return {"error": "borrowed_qty_too_small", "detail": msg}
-
-    params = {"symbol": symbol, "side": "SELL", "type": "MARKET", "quantity": qty_str_final, "timestamp": _now_ms()}
-
-    if DRY_RUN:
-        print(f"[DRY_RUN] Margin SHORT {symbol}: quantity={qty_str_final}")
-        return {"dry_run": True}
-
-    resp = send_signed_request("POST", "/sapi/v1/margin/order", params)
-
-    executed_qty = 0.0
-    entry_price_effective = None
-    if isinstance(resp, dict) and "fills" in resp:
-        executed_qty = sum(float(f["qty"]) for f in resp["fills"])
-        spent_quote = sum(float(f["price"]) * float(f["qty"]) for f in resp["fills"])
-        entry_price_effective = (spent_quote / executed_qty) if executed_qty else None
-    if not entry_price_effective and isinstance(resp, dict):
-        try:
-            executed_qty = float(resp.get("executedQty", 0) or 0)
-            cumm = float(resp.get("cummulativeQuoteQty", 0) or 0)
-            if executed_qty:
-                entry_price_effective = cumm / executed_qty
-        except Exception:
-            pass
-
-    print(f"✅ SHORT opened {symbol} qty={qty_str_final} (executed={executed_qty})")
-
-    if executed_qty > 0 and entry_price_effective:
-        place_sl_tp_margin(symbol, "SELL", entry_price_effective, executed_qty, lot)
-
-    return {"order": resp}
-
-
-# ====== SL/TP FUNCTIONS ======
-def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty: float, lot: dict):
-    """
-    Coloca SL y TP respetando tickSize y minNotional.
-    - Para LONG: SL ROUND_DOWN (más conservador), TP ROUND_UP (asegurar alcanzar)
-    - Para SHORT: SL ROUND_UP (SL está por encima), TP ROUND_DOWN
-    Saltamos SL/TP si el notional resultante < minNotional.
-    """
-    try:
-        sl_side = "SELL" if side == "BUY" else "BUY"
-
-        if side == "BUY":  # LONG
-            sl_price = entry_price * STOP_LOSS_PCT
-            tp_price = entry_price * TAKE_PROFIT_PCT
-            sl_round = ROUND_DOWN
-            tp_round = ROUND_UP
-        else:  # SHORT
-            sl_price = entry_price / STOP_LOSS_PCT
-            tp_price = entry_price / TAKE_PROFIT_PCT
-            sl_round = ROUND_UP
-            tp_round = ROUND_DOWN
-
-        sl_price_str = format_price_to_tick(sl_price, lot["tickSize_str"], rounding=sl_round)
-        tp_price_str = format_price_to_tick(tp_price, lot["tickSize_str"], rounding=tp_round)
-
-        qty_str = floor_to_step_str(executed_qty * float(COMMISSION_BUFFER), lot["stepSize_str"])
-        qty_f = float(qty_str)
-
-        for label, price_str in [("SL", sl_price_str), ("TP", tp_price_str)]:
-            price_f = float(price_str)
-            notional = price_f * qty_f
-            if notional < lot.get("minNotional", 0.0):
-                print(f"⚠️ Skipping {label} for {symbol}: notional {notional:.8f} < minNotional {lot.get('minNotional')}")
-                continue
-
-            params = {
-                "symbol": symbol,
-                "side": sl_side,
-                "type": "LIMIT",
-                "timeInForce": "GTC",
-                "quantity": qty_str,
-                "price": price_str,
-                "timestamp": _now_ms(),
-            }
-            send_signed_request("POST", "/sapi/v1/margin/order", params)
-            print(f"📈 {label} order placed for {symbol} at {price_str} ({sl_side})")
-        return True
-    except Exception as e:
-        print(f"⚠️ Could not place SL/TP for {symbol}: {e}")
-        return False
-
-
-# ====== FLASK WEBHOOK ======
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    try:
-        data = request.get_json(force=True)
-    except Exception:
-        return jsonify({"error": "Invalid JSON"}), 400
-
-    if not data or "symbol" not in data or "side" not in data:
-        return jsonify({"error": "Missing required fields"}), 400
-
-    symbol = data["symbol"]
-    side = data["side"].upper()
-
+    data = request.get_json(force=True)
     print(f"📩 Webhook received: {data}")
 
-    if side == "BUY":
-        resp = execute_long_margin(symbol)
-    elif side == "SELL":
-        resp = execute_short_margin(symbol)
-    else:
-        return jsonify({"error": "Invalid side"}), 400
+    symbol = data.get("symbol")
+    side = data.get("side")
+    entry_price = float(data.get("entry_price", 0))
+    sl = float(data.get("sl", 0))
+    tp = float(data.get("tp", 0))
 
-    return jsonify({"status": "ok", "result": resp}), 200
+    lot = get_lot_size_info(symbol)
+
+    # Balance & cantidad
+    quote = symbol.replace("USDC", "")
+    balance = get_balance_margin("USDC")
+    trade_usdc = balance * TRADE_PORTION
+    qty = trade_usdc / entry_price
+    qty_str = floor_to_step_str(qty, lot["stepSize_str"])
+
+    if "SELL" in side.upper():
+        borrow_asset(quote, qty_str)
+
+    # Orden de entrada
+    order = place_order_margin(symbol, side, qty_str)
+    print(f"✅ {side} opened {symbol} qty={qty_str}")
+
+    # SL/TP
+    if not sl or not tp:
+        sl = entry_price * (1 - STOP_LOSS_PCT if side == "BUY" else 1 + STOP_LOSS_PCT)
+        tp = entry_price * (1 + TAKE_PROFIT_PCT if side == "BUY" else 1 - TAKE_PROFIT_PCT)
+
+    try:
+        place_sl_tp_margin(symbol, side, entry_price, sl, tp, qty, lot)
+    except Exception as e:
+        print(f"⚠️ Could not place SL/TP for {symbol}: {e}")
+
+    return jsonify({"code": "success", "message": "Order executed"})
 
 
-# ====== FLASK EXECUTION ======
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")))
+    app.run(host="0.0.0.0", port=5000)
