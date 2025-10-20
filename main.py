@@ -155,10 +155,26 @@ def execute_short_margin(symbol):
         place_sl_tp_margin(symbol, "SELL", entry_price, float(qty_str), lot)
 
 
+# ====== PRICE ADJUST (añadido) ======
+def format_price_to_tick(price: float, tick_size_str: str) -> str:
+    """
+    Ajusta el precio al tickSize (redondeando hacia abajo) y devuelve string adecuado
+    para enviar a Binance. Usamos Decimal.quantize con ROUND_DOWN para garantizar
+    que el precio es múltiplo del tickSize.
+    """
+    d_tick = Decimal(str(tick_size_str))
+    p = Decimal(str(price)).quantize(d_tick, rounding=ROUND_DOWN)
+    # Formatear con la cantidad de decimales del tick
+    decimals = -d_tick.as_tuple().exponent if d_tick.as_tuple().exponent < 0 else 0
+    fmt = f"{{0:.{decimals}f}}"
+    return fmt.format(p)
+
+
 # ====== SL/TP FUNCTIONS ======
 def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty: float, lot: dict):
     """
     Coloca órdenes LIMIT de Stop Loss y Take Profit en margin tras una operación de entrada.
+    Sólo modificado para ajustar precios al tickSize antes de enviar (solución PRICE_FILTER).
     """
     try:
         sl_side = "SELL" if side == "BUY" else "BUY"
@@ -171,8 +187,10 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
             sl_price = entry_price / STOP_LOSS_PCT
             tp_price = entry_price / TAKE_PROFIT_PCT
 
-        sl_price_str = floor_to_step_str(sl_price, lot["tickSize_str"])
-        tp_price_str = floor_to_step_str(tp_price, lot["tickSize_str"])
+        # --> aquí usamos la función que ajusta al tickSize (evita PRICE_FILTER)
+        sl_price_str = format_price_to_tick(sl_price, lot["tickSize_str"])
+        tp_price_str = format_price_to_tick(tp_price, lot["tickSize_str"])
+
         qty_str = floor_to_step_str(executed_qty * float(COMMISSION_BUFFER), lot["stepSize_str"])
 
         for label, price_str in [("SL", sl_price_str), ("TP", tp_price_str)]:
