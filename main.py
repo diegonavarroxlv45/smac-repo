@@ -22,7 +22,6 @@ DRY_RUN = os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes")
 print = functools.partial(print, flush=True)
 app = Flask(__name__)
 
-
 # ====== AUXILIAR FUNCTIONS ======
 def _now_ms():
     return int(time.time() * 1000)
@@ -60,8 +59,7 @@ def floor_to_step_str(value, step):
     d = Decimal(str(step))
     return str(Decimal(str(value)).quantize(d, rounding=ROUND_DOWN))
 
-
-# ====== BALANCE FUNCTIONS ======
+# ====== BALANCE & MARKET DATA ======
 def get_balance_margin(asset="USDC") -> float:
     ts = _now_ms()
     params = {"timestamp": ts}
@@ -90,6 +88,52 @@ def get_symbol_lot(symbol):
             }
     raise Exception(f"Symbol not found: {symbol}")
 
+# ====== PRE-TRADE CLEANUP ======
+def handle_pre_trade_cleanup(symbol: str):
+    """Cancels previous SL/TP and repays partially if there is debt."""
+    base_asset = symbol.replace("USDC", "")
+    print(f"🔄 Cleaning previous environment for {symbol}...")
+
+    # 1️⃣ Cancel pending orders
+    try:
+        params = {"symbol": symbol, "timestamp": _now_ms()}
+        send_signed_request("DELETE", "/sapi/v1/margin/openOrders", params)
+        print(f"🧹 Pending orders for {symbol} canceled")
+    except Exception as e:
+        print(f"⚠️ Couldn't cancel orders for {symbol}: {e}")
+
+    # 2️⃣ Partial repay (min debt between borrowed and free)
+    try:
+        ts = _now_ms()
+        params_acc = {"timestamp": ts}
+        q, sig = sign_params_query(params_acc, BINANCE_API_SECRET)
+        url = f"{BASE_URL}/sapi/v1/margin/account?{q}&signature={sig}"
+        headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
+        acc_data = _request_with_retries("GET", url, headers=headers)
+
+        asset_data = next((a for a in acc_data["userAssets"] if a["asset"] == base_asset), None)
+        if asset_data:
+            borrowed = float(asset_data["borrowed"])
+            free = float(asset_data["free"])
+
+            if borrowed > 0:
+                repay_amount = min(borrowed, free)
+                if repay_amount > 0:
+                    repay_params = {
+                        "asset": base_asset,
+                        "amount": str(repay_amount),
+                        "timestamp": _now_ms(),
+                    }
+                    send_signed_request("POST", "/sapi/v1/margin/repay", repay_params)
+                    print(f"💰 Partial repay executed: {repay_amount} {base_asset}")
+                else:
+                    print(f"ℹ️ No free balance to repay {base_asset}")
+            else:
+                print(f"✅ No active debt in {base_asset}")
+        else:
+            print(f"ℹ️ {base_asset} doesn't appear on margin (no prevoius activity)")
+    except Exception as e:
+        print(f"⚠️ Error trying repay debt in {base_asset}: {e}")
 
 # ====== MAIN FUNCTIONS ======
 def execute_long_margin(symbol):
@@ -117,23 +161,24 @@ def execute_long_margin(symbol):
         entry_price = spent_quote / executed_qty
         print(f"✅ Margin BUY executed {symbol}: executedQty={executed_qty}, spent≈{spent_quote}")
 
-        # Place SL & TP
         if executed_qty > 0:
             place_sl_tp_margin(symbol, "BUY", entry_price, executed_qty, lot)
 
 
 def execute_short_margin(symbol):
     lot = get_symbol_lot(symbol)
-    borrowed_qty = 0.0
-    balance_base = get_balance_margin(symbol.replace("USDC", ""))
+    balance_usdc = get_balance_margin("USDC")
+    entry_price_data = _request_with_retries("GET", f"{BASE_URL}/api/v3/ticker/price?symbol={symbol}")
+    entry_price = float(entry_price_data["price"])
 
-    if balance_base <= 0:
-        borrow_params = {"asset": symbol.replace("USDC", ""), "amount": 0.002, "timestamp": _now_ms()}
-        send_signed_request("POST", "/sapi/v1/margin/loan", borrow_params)
-        borrowed_qty = 0.002
-        print(f"📥 Borrowed {borrowed_qty} {symbol.replace('USDC', '')}")
+    borrow_amount = (balance_usdc * BUY_PCT) / entry_price
+    borrow_amount = Decimal(str(borrow_amount)).quantize(Decimal(str(lot["stepSize"])), rounding=ROUND_DOWN)
 
-    qty_str = floor_to_step_str(borrowed_qty, lot["stepSize_str"])
+    borrow_params = {"asset": symbol.replace("USDC", ""), "amount": str(borrow_amount), "timestamp": _now_ms()}
+    send_signed_request("POST", "/sapi/v1/margin/loan", borrow_params)
+    print(f"📥 Borrowed {borrow_amount} {symbol.replace('USDC', '')}")
+
+    qty_str = floor_to_step_str(borrow_amount, lot["stepSize_str"])
     params = {
         "symbol": symbol,
         "side": "SELL",
@@ -147,27 +192,23 @@ def execute_short_margin(symbol):
         return
 
     resp = send_signed_request("POST", "/sapi/v1/margin/order", params)
-    entry_price = float(resp.get("price", 0)) or 0.0
+    entry_price = float(resp.get("price", entry_price))
     print(f"✅ SHORT opened {symbol} qty={qty_str}")
 
-    # Place SL & TP
-    if borrowed_qty > 0:
+    if float(qty_str) > 0:
         place_sl_tp_margin(symbol, "SELL", entry_price, float(qty_str), lot)
-
 
 # ====== SL/TP FUNCTIONS ======
 def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty: float, lot: dict):
-    """
-    Coloca órdenes LIMIT de Stop Loss y Take Profit en margin tras una operación de entrada.
-    """
+    """Places LIMIT orders SL/TP with tickSize rounding."""
     try:
         sl_side = "SELL" if side == "BUY" else "BUY"
         tp_side = sl_side
 
-        if side == "BUY":  # LONG
+        if side == "BUY":
             sl_price = entry_price * STOP_LOSS_PCT
             tp_price = entry_price * TAKE_PROFIT_PCT
-        else:  # SHORT
+        else:
             sl_price = entry_price / STOP_LOSS_PCT
             tp_price = entry_price / TAKE_PROFIT_PCT
 
@@ -187,11 +228,11 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
             }
             send_signed_request("POST", "/sapi/v1/margin/order", params)
             print(f"📈 {label} order placed for {symbol} at {price_str} ({sl_side})")
+
         return True
     except Exception as e:
         print(f"⚠️ Could not place SL/TP for {symbol}: {e}")
         return False
-
 
 # ====== FLASK WEBHOOK ======
 @app.route("/webhook", methods=["POST"])
@@ -209,6 +250,9 @@ def webhook():
 
     print(f"📩 Webhook received: {data}")
 
+    # 🔄 SL/TP CLEANING + PARTIAL REPAY BEFORE NEW OPERATION
+    handle_pre_trade_cleanup(symbol)
+
     if side == "BUY":
         execute_long_margin(symbol)
     elif side == "SELL":
@@ -217,7 +261,6 @@ def webhook():
         return jsonify({"error": "Invalid side"}), 400
 
     return jsonify({"status": "ok"})
-
 
 # ====== FLASK EXECUTION ======
 if __name__ == "__main__":
