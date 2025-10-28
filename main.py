@@ -4,7 +4,7 @@ import hmac
 import hashlib
 import requests
 import functools
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN, ROUND_UP, InvalidOperation
 from flask import Flask, request, jsonify
 
 # ====== SETTINGS ======
@@ -38,7 +38,10 @@ def _request_with_retries(method: str, url: str, **kwargs):
         try:
             resp = requests.request(method, url, timeout=10, **kwargs)
             if resp.status_code == 200:
-                return resp.json()
+                try:
+                    return resp.json()
+                except Exception:
+                    return resp.text
             else:
                 print(f"⚠️ Attempt {i+1} failed: {resp.text}")
         except Exception as e:
@@ -48,16 +51,42 @@ def _request_with_retries(method: str, url: str, **kwargs):
 
 
 def send_signed_request(http_method: str, path: str, payload: dict):
-    query_string = "&".join([f"{k}={v}" for k, v in payload.items()])
+    """
+    Ensure timestamp, build deterministic query (sorted keys), sign and request.
+    Logs failures for easier debugging.
+    """
+    if "timestamp" not in payload:
+        payload["timestamp"] = _now_ms()
+    # deterministic order for easier debugging / reproducibility
+    items = [f"{k}={payload[k]}" for k in sorted(payload.keys())]
+    query_string = "&".join(items)
     signature = hmac.new(BINANCE_API_SECRET.encode(), query_string.encode(), hashlib.sha256).hexdigest()
     url = f"{BASE_URL}{path}?{query_string}&signature={signature}"
     headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
-    return _request_with_retries(http_method, url, headers=headers)
+    try:
+        return _request_with_retries(http_method, url, headers=headers)
+    except Exception as e:
+        print(f"⚠️ send_signed_request failed for path={path} payload={payload}: {e}")
+        raise
 
 
 def floor_to_step_str(value, step):
     d = Decimal(str(step))
     return str(Decimal(str(value)).quantize(d, rounding=ROUND_DOWN))
+
+
+def format_price_to_tick(price: float, tick_size_str: str, rounding=ROUND_DOWN) -> str:
+    """
+    Ajusta `price` al múltiplo de `tick_size_str` y devuelve una string con los decimales correctos.
+    Levanta ValueError si la entrada no es válida (será capturado donde se use).
+    """
+    try:
+        d_tick = Decimal(str(tick_size_str))
+        p = Decimal(str(price)).quantize(d_tick, rounding=rounding)
+    except (InvalidOperation, ValueError, TypeError) as e:
+        raise ValueError(f"format_price_to_tick: invalid input price={price} tick={tick_size_str}: {e}")
+    decimals = -d_tick.as_tuple().exponent if d_tick.as_tuple().exponent < 0 else 0
+    return f"{p:.{decimals}f}"
 
 # ====== BALANCE & MARKET DATA ======
 def get_balance_margin(asset="USDC") -> float:
@@ -200,23 +229,54 @@ def execute_short_margin(symbol):
 
 # ====== SL/TP FUNCTIONS ======
 def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty: float, lot: dict):
-    """Places LIMIT orders SL/TP with tickSize rounding."""
+    """Places LIMIT orders SL/TP with tickSize rounding and strict validation."""
     try:
         sl_side = "SELL" if side == "BUY" else "BUY"
-        tp_side = sl_side
 
         if side == "BUY":
             sl_price = entry_price * STOP_LOSS_PCT
             tp_price = entry_price * TAKE_PROFIT_PCT
+            sl_round = ROUND_DOWN
+            tp_round = ROUND_UP
         else:
             sl_price = entry_price / STOP_LOSS_PCT
             tp_price = entry_price / TAKE_PROFIT_PCT
+            sl_round = ROUND_UP
+            tp_round = ROUND_DOWN
 
-        sl_price_str = floor_to_step_str(sl_price, lot["tickSize_str"])
-        tp_price_str = floor_to_step_str(tp_price, lot["tickSize_str"])
+        # use format_price_to_tick to guarantee correct decimals & multiples
+        try:
+            sl_price_str = format_price_to_tick(sl_price, lot["tickSize_str"], rounding=sl_round)
+            tp_price_str = format_price_to_tick(tp_price, lot["tickSize_str"], rounding=tp_round)
+        except Exception as e:
+            print(f"⚠️ Price formatting error for {symbol}: {e}")
+            return False
+
         qty_str = floor_to_step_str(executed_qty * float(COMMISSION_BUFFER), lot["stepSize_str"])
+        qty_f = None
+        try:
+            qty_f = float(qty_str)
+        except Exception:
+            print(f"⚠️ Invalid qty_str computed for {symbol}: {qty_str}")
+            return False
 
         for label, price_str in [("SL", sl_price_str), ("TP", tp_price_str)]:
+            # validation: price not empty, parseable, and notional >= minNotional if present
+            if not price_str or price_str.strip() == "":
+                print(f"⚠️ Skipping {label} for {symbol}: computed price empty or invalid: {price_str!r}")
+                continue
+            try:
+                price_f = float(price_str)
+            except Exception:
+                print(f"⚠️ Skipping {label} for {symbol}: price not parseable as float: {price_str!r}")
+                continue
+
+            notional = price_f * qty_f
+            min_notional = lot.get("minNotional", 0.0)
+            if notional < min_notional:
+                print(f"⚠️ Skipping {label} for {symbol}: notional {notional:.8f} < minNotional {min_notional}")
+                continue
+
             params = {
                 "symbol": symbol,
                 "side": sl_side,
@@ -226,8 +286,14 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
                 "price": price_str,
                 "timestamp": _now_ms(),
             }
-            send_signed_request("POST", "/sapi/v1/margin/order", params)
-            print(f"📈 {label} order placed for {symbol} at {price_str} ({sl_side})")
+
+            # debug print for clarity
+            print(f"📤 Placing {label} for {symbol}: side={sl_side} qty={qty_str} price={price_str}")
+            try:
+                send_signed_request("POST", "/sapi/v1/margin/order", params)
+                print(f"📈 {label} order placed for {symbol} at {price_str} ({sl_side})")
+            except Exception as e:
+                print(f"⚠️ Could not place {label} for {symbol}: {e}")
 
         return True
     except Exception as e:
