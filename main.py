@@ -4,7 +4,7 @@ import hmac
 import hashlib
 import requests
 import functools
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from flask import Flask, request, jsonify
 
 # ====== SETTINGS ======
