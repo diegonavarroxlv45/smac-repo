@@ -121,7 +121,25 @@ def format_price_to_tick(price: float, tick_size_str: str, rounding=ROUND_DOWN) 
     d_tick = Decimal(str(tick_size_str))
     p = Decimal(str(price)).quantize(d_tick, rounding=rounding)
     decimals = -d_tick.as_tuple().exponent if d_tick.as_tuple().exponent < 0 else 0
-    return f"{p:.{decimals}f}"
+    # format using decimals
+    return format(p, f".{decimals}f")
+
+
+# ====== HELPER: GET OPEN MARGIN ORDERS ======
+def get_open_margin_orders(symbol: str):
+    """Devuelve lista de órdenes abiertas para el símbolo en margin."""
+    try:
+        params = {"symbol": symbol, "timestamp": _now_ms()}
+        resp = send_signed_request("GET", "/sapi/v1/margin/openOrders", params)
+        if isinstance(resp, list):
+            return resp
+        # some endpoints might return dict with 'orders'
+        if isinstance(resp, dict) and "orders" in resp:
+            return resp["orders"]
+        return []
+    except Exception as e:
+        print(f"⚠️ Could not fetch open orders for {symbol}: {e}")
+        return []
 
 
 # ====== PRE-TRADE CLEANUP ======
@@ -328,6 +346,7 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
     """
     Coloca SL y TP respetando tickSize y minNotional.
     Usa valores de webhook (sl_override/tp_override) si vienen; si no, calcula con STOP_LOSS_PCT/TAKE_PROFIT_PCT.
+    Tras crear, comprueba órdenes abiertas y reintenta crear cualquiera que falte.
     """
     try:
         sl_side = "SELL" if side == "BUY" else "BUY"
@@ -353,39 +372,117 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
         qty_str = floor_to_step_str(executed_qty * float(COMMISSION_BUFFER), lot["stepSize_str"])
         qty_f = float(qty_str)
 
-        for label, price_str in [("SL", sl_price_str), ("TP", tp_price_str)]:
-            # validar price y notional antes de enviar
-            try:
-                price_f = float(price_str)
-            except Exception:
-                print(f"⚠️ {label} price malformed for {symbol}: {price_str}, skipping")
-                continue
-
-            # Si el price es 0 (o menor al tickSize), saltamos y lo notificamos
-            if price_f <= 0 or price_f < lot["tickSize"]:
-                print(f"⚠️ Skipping {label} for {symbol}: price {price_f} < tickSize {lot['tickSize']}")
-                continue
-
-            notional = price_f * qty_f
-            if notional < lot.get("minNotional", 0.0):
-                print(f"⚠️ Skipping {label} for {symbol}: notional {notional:.8f} < minNotional {lot.get('minNotional')}")
-                continue
-
-            params = {
+        # prepare params for both orders so we can retry if missing
+        orders_to_place = [
+            ("SL", {
                 "symbol": symbol,
                 "side": sl_side,
                 "type": "LIMIT",
                 "timeInForce": "GTC",
                 "quantity": qty_str,
-                "price": price_str,
+                "price": sl_price_str,
                 "timestamp": _now_ms(),
-            }
+            }, sl_price_str),
+            ("TP", {
+                "symbol": symbol,
+                "side": sl_side,
+                "type": "LIMIT",
+                "timeInForce": "GTC",
+                "quantity": qty_str,
+                "price": tp_price_str,
+                "timestamp": _now_ms(),
+            }, tp_price_str),
+        ]
+
+        placed = {}
+        # First attempt: place both (if they pass validations)
+        for label, params, price_str in orders_to_place:
+            try:
+                price_f = float(price_str)
+            except Exception:
+                print(f"⚠️ {label} price malformed for {symbol}: {price_str}, skipping")
+                placed[label] = False
+                continue
+
+            if price_f <= 0 or price_f < lot["tickSize"]:
+                print(f"⚠️ Skipping {label} for {symbol}: price {price_f} < tickSize {lot['tickSize']}")
+                placed[label] = False
+                continue
+
+            notional = price_f * qty_f
+            if notional < lot.get("minNotional", 0.0):
+                print(f"⚠️ Skipping {label} for {symbol}: notional {notional:.8f} < minNotional {lot.get('minNotional')}")
+                placed[label] = False
+                continue
+
             try:
                 send_signed_request("POST", "/sapi/v1/margin/order", params)
                 print(f"📈 {label} order placed for {symbol} at {price_str} ({sl_side})")
+                placed[label] = True
             except Exception as e:
                 print(f"⚠️ send_signed_request failed for path=/sapi/v1/margin/order payload={params}: {e}")
-                print(f"⚠️ Could not place {label} for {symbol}: {e}")
+                placed[label] = False
+
+        # short pause to allow Binance to register orders
+        time.sleep(0.6)
+
+        # Verify open orders and retry missing ones (up to 2 retries)
+        open_orders = get_open_margin_orders(symbol)
+        # build set of (side, price) tuples present
+        open_set = set()
+        for o in open_orders:
+            try:
+                op_side = o.get("side") or o.get("orderSide") or ""
+                op_price = str(o.get("price") or o.get("avgPrice") or "")
+                # normalize formatting
+                op_price_dec = format(Decimal(str(op_price or "0")), f".{len(lot['tickSize_str'].split('.')[-1])}f") if op_price else ""
+                open_set.add((op_side.upper(), op_price_dec))
+            except Exception:
+                continue
+
+        # For each order we intended to place, check presence; if missing -> retry
+        for label, params, price_str in orders_to_place:
+            expected_side = params["side"].upper()
+            expected_price = price_str
+            # Some API responses may format price slightly differently; compare Decimal equality as string with same quantization
+            try:
+                expected_price_norm = format(Decimal(str(expected_price)), f".{len(lot['tickSize_str'].split('.')[-1])}f")
+            except Exception:
+                expected_price_norm = expected_price
+
+            exists = (expected_side, expected_price_norm) in open_set
+            if exists:
+                continue  # OK
+
+            # If it wasn't placed initially or not found in open orders, attempt retries
+            retries = 0
+            max_retries = 2
+            while retries < max_retries and not exists:
+                retries += 1
+                print(f"🔁 Retry {retries}/{max_retries} creating {label} for {symbol} at {expected_price_norm}")
+                params["timestamp"] = _now_ms()
+                try:
+                    send_signed_request("POST", "/sapi/v1/margin/order", params)
+                    # small wait then refresh open_orders
+                    time.sleep(0.6)
+                    open_orders = get_open_margin_orders(symbol)
+                    open_set = set()
+                    for o in open_orders:
+                        try:
+                            op_side = o.get("side") or o.get("orderSide") or ""
+                            op_price = str(o.get("price") or o.get("avgPrice") or "")
+                            op_price_dec = format(Decimal(str(op_price or "0")), f".{len(lot['tickSize_str'].split('.')[-1])}f") if op_price else ""
+                            open_set.add((op_side.upper(), op_price_dec))
+                        except Exception:
+                            continue
+                    exists = (expected_side, expected_price_norm) in open_set
+                    if exists:
+                        print(f"✅ After retry {retries}, {label} exists for {symbol} at {expected_price_norm}")
+                        break
+                except Exception as e:
+                    print(f"⚠️ Retry {retries} failed for {label} on {symbol}: {e}")
+            if not exists:
+                print(f"⚠️ After {max_retries} retries, {label} still missing for {symbol}.")
         return True
     except Exception as e:
         print(f"⚠️ Could not place SL/TP for {symbol}: {e}")
