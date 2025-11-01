@@ -375,7 +375,7 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
                 params = {
                     "symbol": symbol,
                     "side": sl_side,
-                    "type": "STOP_MARKET",
+                    "type": "STOP_LOSS",
                     "stopPrice": price_str,
                     "quantity": qty_str,
                     "timestamp": _now_ms(),
