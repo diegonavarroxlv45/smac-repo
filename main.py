@@ -327,6 +327,7 @@ def execute_short_margin(symbol, webhook_data=None):
 def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty: float, lot: dict, sl_override=None, tp_override=None):
     """
     Coloca SL y TP respetando tickSize y minNotional.
+    SL ahora usa STOP_MARKET, mientras que TP sigue siendo LIMIT.
     Usa valores de webhook (sl_override/tp_override) si vienen; si no, calcula con STOP_LOSS_PCT/TAKE_PROFIT_PCT.
     """
     try:
@@ -354,14 +355,12 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
         qty_f = float(qty_str)
 
         for label, price_str in [("SL", sl_price_str), ("TP", tp_price_str)]:
-            # validar price y notional antes de enviar
             try:
                 price_f = float(price_str)
             except Exception:
                 print(f"⚠️ {label} price malformed for {symbol}: {price_str}, skipping")
                 continue
 
-            # Si el price es 0 (o menor al tickSize), saltamos y lo notificamos
             if price_f <= 0 or price_f < lot["tickSize"]:
                 print(f"⚠️ Skipping {label} for {symbol}: price {price_f} < tickSize {lot['tickSize']}")
                 continue
@@ -371,25 +370,40 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
                 print(f"⚠️ Skipping {label} for {symbol}: notional {notional:.8f} < minNotional {lot.get('minNotional')}")
                 continue
 
-            params = {
-                "symbol": symbol,
-                "side": sl_side,
-                "type": "LIMIT",
-                "timeInForce": "GTC",
-                "quantity": qty_str,
-                "price": price_str,
-                "timestamp": _now_ms(),
-            }
+            # ✅ Diferenciar tipos de orden
+            if label == "SL":
+                params = {
+                    "symbol": symbol,
+                    "side": sl_side,
+                    "type": "STOP_MARKET",
+                    "stopPrice": price_str,
+                    "quantity": qty_str,
+                    "timestamp": _now_ms(),
+                }
+            else:  # TP
+                params = {
+                    "symbol": symbol,
+                    "side": sl_side,
+                    "type": "LIMIT",
+                    "timeInForce": "GTC",
+                    "quantity": qty_str,
+                    "price": price_str,
+                    "timestamp": _now_ms(),
+                }
+
             try:
                 send_signed_request("POST", "/sapi/v1/margin/order", params)
-                print(f"📈 {label} order placed for {symbol} at {price_str} ({sl_side})")
+                print(f"📈 {label} ({params['type']}) order placed for {symbol} at {price_str} ({sl_side})")
             except Exception as e:
                 print(f"⚠️ send_signed_request failed for path=/sapi/v1/margin/order payload={params}: {e}")
                 print(f"⚠️ Could not place {label} for {symbol}: {e}")
+
         return True
+
     except Exception as e:
         print(f"⚠️ Could not place SL/TP for {symbol}: {e}")
         return False
+
 
 
 # ====== FLASK WEBHOOK ======
