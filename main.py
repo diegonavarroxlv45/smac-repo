@@ -333,7 +333,7 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
     try:
         oco_side = "SELL" if side == "BUY" else "BUY"
 
-        # === Calcular precios ===
+        # === Price calculation ===
         if sl_override is not None:
             sl_price = float(sl_override)
             sl_rounding = ROUND_DOWN if side == "BUY" else ROUND_UP
@@ -348,13 +348,13 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
             tp_price = entry_price * TAKE_PROFIT_PCT if side == "BUY" else entry_price / TAKE_PROFIT_PCT
             tp_rounding = ROUND_UP if side == "BUY" else ROUND_DOWN
 
-        # === Ajustar a tickSize ===
+        # === tickSize adjusting ===
         sl_price_str = format_price_to_tick(sl_price, lot["tickSize_str"], rounding=sl_rounding)
         tp_price_str = format_price_to_tick(tp_price, lot["tickSize_str"], rounding=tp_rounding)
         qty_str = floor_to_step_str(executed_qty * float(COMMISSION_BUFFER), lot["stepSize_str"])
         qty_f = float(qty_str)
 
-        # === Validaciones básicas ===
+        # === Basic validations ===
         for label, price_str in [("SL", sl_price_str), ("TP", tp_price_str)]:
             try:
                 price_f = float(price_str)
@@ -371,14 +371,14 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
                 print(f"⚠️ Skipping {label} for {symbol}: notional {notional:.8f} < minNotional {lot.get('minNotional')}")
                 return False
 
-        # === Crear stopLimitPrice seguro ===
+        # === stopLimitPrice ===
         stop_limit_raw = float(sl_price_str) * (0.999 if side == "BUY" else 1.001)
         tick = float(lot["tickSize_str"])
         # Forzar que sea múltiplo exacto del tickSize y con el formato correcto
         stop_limit_aligned = math.floor(stop_limit_raw / tick) * tick
         stop_limit_price = f"{stop_limit_aligned:.{lot['tickSize_str'].split('.')[-1].find('1')}f}"
 
-        # === Crear orden OCO ===
+        # === Create OCO ===
         params = {
             "symbol": symbol,
             "side": oco_side,
