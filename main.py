@@ -347,7 +347,7 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
             tp_price = entry_price * TAKE_PROFIT_PCT if side == "BUY" else entry_price / TAKE_PROFIT_PCT
             tp_rounding = ROUND_UP if side == "BUY" else ROUND_DOWN
 
-        # Ajustar al tickSize
+        # Ajust to tickSize
         sl_price_str = format_price_to_tick(sl_price, lot["tickSize_str"], rounding=sl_rounding)
         tp_price_str = format_price_to_tick(tp_price, lot["tickSize_str"], rounding=tp_rounding)
 
@@ -370,7 +370,7 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
                 print(f"⚠️ Skipping {label} for {symbol}: notional {notional:.8f} < minNotional {lot.get('minNotional')}")
                 continue
 
-            # ✅ Diferenciar tipos de orden
+            # ✅ Types of order for SL & TP
             if label == "SL":
                 params = {
                     "symbol": symbol,
