@@ -323,16 +323,17 @@ def execute_short_margin(symbol, webhook_data=None):
     return {"order": resp}
 
 
-# ====== SL/TP FUNCTIONS ======
+# ====== SL/TP FUNCTIONS (OCO VERSION) ======
 def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty: float, lot: dict, sl_override=None, tp_override=None):
     """
-    Coloca SL y TP respetando tickSize y minNotional.
-    SL ahora usa STOP_MARKET, mientras que TP sigue siendo LIMIT.
+    Coloca una orden OCO (One Cancels the Other) en Binance Margin.
+    Incluye un Take Profit (LIMIT_MAKER) y un Stop Loss (STOP_LIMIT).
     Usa valores de webhook (sl_override/tp_override) si vienen; si no, calcula con STOP_LOSS_PCT/TAKE_PROFIT_PCT.
     """
     try:
-        sl_side = "SELL" if side == "BUY" else "BUY"
+        oco_side = "SELL" if side == "BUY" else "BUY"
 
+        # === Calcular precios ===
         if sl_override is not None:
             sl_price = float(sl_override)
             sl_rounding = ROUND_DOWN if side == "BUY" else ROUND_UP
@@ -347,61 +348,59 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
             tp_price = entry_price * TAKE_PROFIT_PCT if side == "BUY" else entry_price / TAKE_PROFIT_PCT
             tp_rounding = ROUND_UP if side == "BUY" else ROUND_DOWN
 
-        # Ajust to tickSize
+        # Ajustar a tickSize
         sl_price_str = format_price_to_tick(sl_price, lot["tickSize_str"], rounding=sl_rounding)
         tp_price_str = format_price_to_tick(tp_price, lot["tickSize_str"], rounding=tp_rounding)
-
         qty_str = floor_to_step_str(executed_qty * float(COMMISSION_BUFFER), lot["stepSize_str"])
         qty_f = float(qty_str)
 
+        # Validaciones básicas
         for label, price_str in [("SL", sl_price_str), ("TP", tp_price_str)]:
             try:
                 price_f = float(price_str)
             except Exception:
                 print(f"⚠️ {label} price malformed for {symbol}: {price_str}, skipping")
-                continue
+                return False
 
             if price_f <= 0 or price_f < lot["tickSize"]:
                 print(f"⚠️ Skipping {label} for {symbol}: price {price_f} < tickSize {lot['tickSize']}")
-                continue
+                return False
 
             notional = price_f * qty_f
             if notional < lot.get("minNotional", 0.0):
                 print(f"⚠️ Skipping {label} for {symbol}: notional {notional:.8f} < minNotional {lot.get('minNotional')}")
-                continue
+                return False
 
-            # ✅ Types of order for SL & TP
-            if label == "SL":
-                params = {
-                    "symbol": symbol,
-                    "side": sl_side,
-                    "type": "STOP_LOSS",
-                    "stopPrice": price_str,
-                    "quantity": qty_str,
-                    "timestamp": _now_ms(),
-                }
-            else:  # TP
-                params = {
-                    "symbol": symbol,
-                    "side": sl_side,
-                    "type": "LIMIT",
-                    "timeInForce": "GTC",
-                    "quantity": qty_str,
-                    "price": price_str,
-                    "timestamp": _now_ms(),
-                }
+        # === Crear orden OCO ===
+        # Nota: stopLimitPrice suele ponerse un pequeño margen peor que stopPrice
+        stop_limit_price = format_price_to_tick(
+            float(sl_price_str) * (0.999 if side == "BUY" else 1.001),
+            lot["tickSize_str"],
+            rounding=sl_rounding
+        )
 
-            try:
-                send_signed_request("POST", "/sapi/v1/margin/order", params)
-                print(f"📈 {label} ({params['type']}) order placed for {symbol} at {price_str} ({sl_side})")
-            except Exception as e:
-                print(f"⚠️ send_signed_request failed for path=/sapi/v1/margin/order payload={params}: {e}")
-                print(f"⚠️ Could not place {label} for {symbol}: {e}")
+        params = {
+            "symbol": symbol,
+            "side": oco_side,
+            "quantity": qty_str,
+            "price": tp_price_str,                # Take Profit
+            "stopPrice": sl_price_str,            # Activador Stop
+            "stopLimitPrice": stop_limit_price,   # Precio límite del Stop
+            "stopLimitTimeInForce": "GTC",
+            "timestamp": _now_ms(),
+        }
 
-        return True
+        try:
+            send_signed_request("POST", "/sapi/v1/margin/order/oco", params)
+            print(f"📈 OCO order placed for {symbol}: TP={tp_price_str}, SL={sl_price_str} ({oco_side})")
+            return True
+        except Exception as e:
+            print(f"⚠️ send_signed_request failed for /sapi/v1/margin/order/oco payload={params}: {e}")
+            print(f"⚠️ Could not place OCO for {symbol}: {e}")
+            return False
 
     except Exception as e:
-        print(f"⚠️ Could not place SL/TP for {symbol}: {e}")
+        print(f"⚠️ Could not place OCO SL/TP for {symbol}: {e}")
         return False
 
 
