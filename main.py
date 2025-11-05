@@ -15,8 +15,8 @@ BASE_URL = "https://api.binance.com"
 
 BUY_PCT = float(os.getenv("BUY_PCT", "0.04"))
 MAX_USDC_PER_ORDER = float(os.getenv("MAX_USDC_PER_ORDER", "100"))
-STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.97"))
-TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", "1.06"))
+STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.98"))
+TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", "1.04"))
 COMMISSION_BUFFER = Decimal(os.getenv("COMMISSION_BUFFER", "0.999"))
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes")
 
