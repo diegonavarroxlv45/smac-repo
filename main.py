@@ -13,7 +13,7 @@ BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
 BASE_URL = "https://api.binance.com"
 
-BUY_PCT = float(os.getenv("BUY_PCT", "0.04"))
+RISK_PCT = float(os.getenv("RISK_PCT", "0.04"))
 MAX_USDC_PER_ORDER = float(os.getenv("MAX_USDC_PER_ORDER", "100"))
 STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.98"))
 TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", "1.04"))
@@ -177,7 +177,7 @@ def handle_pre_trade_cleanup(symbol: str):
 def execute_long_margin(symbol, webhook_data=None):
     lot = get_symbol_lot(symbol)
     balance_usdc = get_balance_margin("USDC")
-    qty_quote = min(balance_usdc * BUY_PCT, MAX_USDC_PER_ORDER)
+    qty_quote = min(balance_usdc * RISK_PCT, MAX_USDC_PER_ORDER)
 
     params = {
         "symbol": symbol,
@@ -244,7 +244,7 @@ def execute_short_margin(symbol, webhook_data=None):
         print("⚠️ Price estimate invalid, aborting short.")
         return {"error": "invalid_price_est"}
 
-    raw_qty = Decimal(str(balance_usdc * BUY_PCT)) / Decimal(str(price_est))
+    raw_qty = Decimal(str(balance_usdc * RISK_PCT)) / Decimal(str(price_est))
     borrow_amount = float(raw_qty.quantize(Decimal(str(lot["stepSize_str"])), rounding=ROUND_DOWN))
 
     # validations
