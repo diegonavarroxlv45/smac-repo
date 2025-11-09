@@ -393,7 +393,7 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
 
         try:
             send_signed_request("POST", "/sapi/v1/margin/order/oco", params)
-            print(f"📈 OCO order placed for {symbol}: TP={tp_price_str}, SL={sl_price_str}, stopLimit={stop_limit_price} ({oco_side})")
+            print(f"📈 OCO order placed for {symbol}: TP={tp_price_str}, SL={sl_price_str}, stopLimit={stop_limit_price} ({oco_side}), qty={qty_str}")
             return True
         except Exception as e:
             print(f"⚠️ send_signed_request failed for /sapi/v1/margin/order/oco payload={params}: {e}")
