@@ -384,9 +384,9 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
             "symbol": symbol,
             "side": oco_side,
             "quantity": qty_str,
-            "price": tp_price_str,                # Take Profit
-            "stopPrice": sl_price_str,            # Activador Stop
-            "stopLimitPrice": stop_limit_price,   # Precio límite del Stop (ya alineado)
+            "price": tp_price_str,
+            "stopPrice": sl_price_str,
+            "stopLimitPrice": stop_limit_price,
             "stopLimitTimeInForce": "GTC",
             "timestamp": _now_ms(),
         }
