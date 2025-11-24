@@ -4,7 +4,7 @@
 #
 
 app = "smac-repo"
-primary_region = "fra"
+primary_region = "iad"
 
 [build]
 
