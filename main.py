@@ -13,7 +13,7 @@ BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
 BASE_URL = "https://api.binance.com"
 
-RISK_PCT = float(os.getenv("RISK_PCT", "0.04"))
+RISK_PCT = float(os.getenv("RISK_PCT", "0.05"))
 MAX_USDC_PER_ORDER = float(os.getenv("MAX_USDC_PER_ORDER", "100"))
 STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.98"))
 TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", "1.04"))
