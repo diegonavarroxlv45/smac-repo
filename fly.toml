@@ -4,10 +4,7 @@
 #
 
 app = "smac-repo"
-primary_region = "iad"
-
-[build]
-  image = "python:3.11-slim"
+primary_region = "cdg"
 
 [env]
   PORT = "5000"
