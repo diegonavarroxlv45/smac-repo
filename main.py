@@ -493,7 +493,7 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
 
 
 # ====== ADMIN FUNCTIONS ======
-def clear(): 
+def clear():
     print("🔁 Converting ALL assets to USDC...")
     account = get_margin_account()
 
@@ -510,7 +510,7 @@ def clear():
         symbol = f"{asset_name}USDC"
 
         try:
-            print(f"↪ Clearing {free_qty} {asset_name}") 
+            print(f"↪ Clearing {free_qty} {asset_name}")
             handle_pre_trade_cleanup(symbol)
             cleared_symbols.append(symbol)
         except Exception as e:
@@ -518,11 +518,8 @@ def clear():
             failed_symbols.append({"symbol": symbol, "error": str(e)})
 
     print("✅ CLEAR completed")
-    except Exception as e:
-        failed_symbols.append({"symbol": symbol, "error": str(e)})
-
     return {"cleared": cleared_symbols, "failed": failed_symbols}
-
+    
 def read():
     print("📊 Reading Cross Margin account snapshot...")
 
