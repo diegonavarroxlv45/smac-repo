@@ -11,6 +11,7 @@ from flask import Flask, request, jsonify
 # ====== SETTINGS ======
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
+TRADING_KEY = os.getenv("TRADING_KEY")
 ADMIN_KEY = os.getenv("ADMIN_KEY")
 BASE_URL = "https://api.binance.com"
 
@@ -28,6 +29,8 @@ if not BINANCE_API_SECRET:
 
 print("🔐 Binance API credentials loaded successfully")
 
+RETRY_AMOUNT = int(os.getenv("RETRY_AMOUNT", "3"))
+RETRY_AMOUNT = max(0, min(RETRY_AMOUNT, 5))
 RISK_PCT = float(os.getenv("RISK_PCT", "0.05"))
 STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.98"))
 TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", "1.04"))
@@ -36,6 +39,12 @@ DRY_RUN = os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes")
 
 print = functools.partial(print, flush=True)
 app = Flask(__name__)
+
+# ===== GLOBAL RISK STATE =====
+TRADING_BLOCKED = False
+DEFAULT_RISK_PCT = 0.05
+RISK_PCT = DEFAULT_RISK_PCT
+
 
 # ====== AUXILIAR FUNCTIONS ======
 def _now_ms():
@@ -49,7 +58,7 @@ def sign_params_query(params: dict, secret: str):
 
 
 def _request_with_retries(method: str, url: str, **kwargs):
-    for i in range(3):
+    for i in range(RETRY_AMOUNT):
         try:
             resp = requests.request(method, url, timeout=10, **kwargs)
             if resp.status_code == 200:
@@ -76,9 +85,6 @@ def send_signed_request(http_method: str, path: str, payload: dict):
 
 
 def floor_to_step_str(value, step_str):
-    """
-    Rounds down in base of step_str, returns string with step decimals.
-    """
     step = Decimal(str(step_str))
     v = Decimal(str(value))
     n = (v // step) * step
@@ -103,9 +109,6 @@ def get_balance_margin(asset="USDC") -> float:
 
 
 def get_symbol_lot(symbol):
-    """
-    Returns useful information: stepSize_str, tickSize_str, minQty, minNotional.
-    """
     data = _request_with_retries("GET", f"{BASE_URL}/api/v3/exchangeInfo")
     for s in data["symbols"]:
         if s["symbol"] == symbol:
@@ -115,35 +118,62 @@ def get_symbol_lot(symbol):
             if not fs or not ts:
                 raise Exception(f"Missing LOT_SIZE or PRICE_FILTER for {symbol}")
             minNotional = float(mnf.get("minNotional") or mnf.get("notional") or 0.0) if mnf else 0.0
-            return {
-                "stepSize_str": fs["stepSize"],
-                "stepSize": float(fs["stepSize"]),
-                "minQty": float(fs.get("minQty", 0.0)),
-                "tickSize_str": ts["tickSize"],
-                "tickSize": float(ts["tickSize"]),
-                "minNotional": minNotional,
-            }
+            return {"stepSize_str": fs["stepSize"], "stepSize": float(fs["stepSize"]), "minQty": float(fs.get("minQty", 0.0)), "tickSize_str": ts["tickSize"], "tickSize": float(ts["tickSize"]), "minNotional": minNotional,}
     raise Exception(f"Symbol not found: {symbol}")
 
 
 # ====== PRICE ADJUST (tickSize) ======
 def format_price_to_tick(price: float, tick_size_str: str, rounding=ROUND_DOWN) -> str:
-    """
-    Ajusts price to tick_size. rounding can be ROUND_DOWN o ROUND_UP.
-    Returns string with correct decimals.
-    """
     d_tick = Decimal(str(tick_size_str))
     p = Decimal(str(price)).quantize(d_tick, rounding=rounding)
     decimals = -d_tick.as_tuple().exponent if d_tick.as_tuple().exponent < 0 else 0
     return f"{p:.{decimals}f}"
 
 
+# ===== CHECK MARGIN LEVEL BEFORE OPERATING =====
+def check_margin_level():
+    global TRADING_BLOCKED, RISK_PCT
+
+    try:
+        account_info = get_margin_account()
+        margin_level = float(account_info["marginLevel"])
+        print(f"🧮 Current Margin Level: {margin_level:.2f}")
+
+        # 🚨 CRITICAL — CONTROLLED LIQUIDATION
+        if margin_level < 1.16:
+            print("🚨 CRITICAL! Margin < 1.16 — EXECUTING CONTROLLED LIQUIDATION")
+            TRADING_BLOCKED = True
+            clear()
+            return False
+
+        # 🔴 EMERGENCY — REDUCE RISK + BLOCK NEW ENTRIES
+        elif margin_level < 1.25:
+            print("🔴 DANGER! Margin < 1.25 — BLOCKING NEW ENTRIES")
+            TRADING_BLOCKED = True
+            return True
+
+        # 🟠 DEFENSIVE — FREEZE SYSTEM
+        elif margin_level < 2:
+            print("🟠 WARNING! Margin < 2 — REDUCING RISK")
+            RISK_PCT = 0.02
+            return True
+
+        else:
+            if TRADING_BLOCKED:
+                print("✅ Margin recovered — resuming normal operation")
+
+            TRADING_BLOCKED = False
+            RISK_PCT = DEFAULT_RISK_PCT
+            print("✅ Margin level healthy")
+            return True
+
+    except Exception as e:
+        print(f"⚠️ Could not fetch margin level: {e}")
+        return True
+
+
 # ====== PRE-TRADE CLEANUP ======
 def handle_pre_trade_cleanup(symbol: str):
-    """
-    Cancels previous orders, repays debt safely (buying missing base if needed),
-    then sells any residual base asset.
-    """
     base_asset = symbol.replace("USDC", "")
     print(f"🔄 Cleaning previous environment for {symbol}...")
 
@@ -155,7 +185,7 @@ def handle_pre_trade_cleanup(symbol: str):
     except Exception as e:
         print(f"⚠️ Couldn't cancel orders for {symbol}: {e}")
 
-    # === 2️⃣ SAFE REPAY LOGIC ===
+    # === 2️⃣ Repay debt ===
     try:
         ts = _now_ms()
         q, sig = sign_params_query({"timestamp": ts}, BINANCE_API_SECRET)
@@ -237,7 +267,7 @@ def handle_pre_trade_cleanup(symbol: str):
     except Exception as e:
         print(f"⚠️ Error during repay in {base_asset}: {e}")
 
-    # === 3️⃣ SELL residual base asset ===
+    # === 3️⃣ Sell residual balance ===
     try:
         lot = get_symbol_lot(symbol)
 
@@ -386,7 +416,6 @@ def execute_short_margin(symbol, webhook_data=None):
     print(f"📉 SHORT opened {symbol}: qty={executed_qty} (spent≈{(entry_price * executed_qty) if entry_price else 'unknown'})")
 
     if executed_qty > 0 and entry_price:
-        # use sl/tp from webhook if provided
         sl_from_web = None
         tp_from_web = None
         if webhook_data:
@@ -399,9 +428,6 @@ def execute_short_margin(symbol, webhook_data=None):
 
 # ====== SL/TP FUNCTIONS (OCO VERSION) ======
 def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty: float, lot: dict, sl_override=None, tp_override=None):
-    """
-    Places an OCO (One Cancels the Other) on Binance Margin.
-    """
     try:
         oco_side = "SELL" if side == "BUY" else "BUY"
 
@@ -467,59 +493,16 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
 
 
 # ====== ADMIN FUNCTIONS ======
-def cancel_all_margin_orders():
-    print("🧹 Cancelling ALL margin open orders...")
-
-    open_orders = send_signed_request(
-        "GET",
-        "/sapi/v1/margin/openOrders",
-        {}
-    )
-
-    if not open_orders:
-        print("✅ No margin open orders found")
-        return
-
-    symbols = {order["symbol"] for order in open_orders}
-
-    for symbol in symbols:
-        try:
-            print(f"↪ Cancelling orders for {symbol}")
-            send_signed_request(
-                "DELETE",
-                "/sapi/v1/margin/openOrders",
-                {"symbol": symbol}
-            )
-        except Exception as e:
-            print(f"⚠️ Failed cancelling {symbol}: {e}")
-
-def repay_all_margin_debts():
-    print("💳 Repaying ALL margin debts...")
-
-    acc = get_margin_account()
-
-    for asset in acc["userAssets"]:
-        if asset["asset"] == "USDC":
-            continue
-
-        borrowed = float(asset["borrowed"])
-        if borrowed <= 0:
-            continue
-
-        symbol = asset["asset"] + "USDC"
-        print(f"↪ Repaying {borrowed} {asset['asset']}")
-
-        handle_pre_trade_cleanup(symbol)
-
-    print("✅ All debts processed")
-
-def convert_all_assets_to_usdc():
+def clear(): 
     print("🔁 Converting ALL assets to USDC...")
     account = get_margin_account()
 
+    cleared_symbols = []
+    failed_symbols = []
+
     for asset in account["userAssets"]:
         asset_name = asset["asset"]
-        free_qty = Decimal(asset["free"])
+        free_qty = float(asset["free"])
 
         if asset_name == "USDC" or free_qty <= 0:
             continue
@@ -527,9 +510,104 @@ def convert_all_assets_to_usdc():
         symbol = f"{asset_name}USDC"
 
         try:
-            sell_residual_asset(symbol, free_qty)
+            print(f"↪ Clearing {free_qty} {asset_name}") 
+            handle_pre_trade_cleanup(symbol)
+            cleared_symbols.append(symbol)
         except Exception as e:
             print(f"⚠️ Could not convert {symbol}: {e}")
+            failed.append({"symbol": symbol, "error": str(e)})
+
+    print("✅ CLEAR completed")
+    return failed.append({"symbol": symbol, "error": str(e)})
+
+def read():
+    print("📊 Reading Cross Margin account snapshot...")
+
+    acc = get_margin_account()
+
+    total_debt = 0.0
+    usdc_balance = 0.0
+    usdc_borrowed = 0.0
+
+    for asset in acc["userAssets"]:
+        borrowed = float(asset["borrowed"])
+        total_debt += borrowed
+
+        if asset["asset"] == "USDC":
+            usdc_balance = float(asset["free"]) + float(asset["locked"])
+            usdc_borrowed = borrowed
+
+    btc_usdc_price = get_btc_usdc_price()
+    total_balance_usdc = float(acc["totalNetAssetOfBtc"]) * btc_usdc_price
+    margin_level = float(acc["marginLevel"])
+
+    print("────────── 📊 ACCOUNT SNAPSHOT 📊 ──────────")
+    print(f"├─ 💰 Total Balance (USDC) : {total_balance_usdc:.8f}")
+    print(f"├─ 💸 USDC Balance         : {usdc_balance:.8f}")
+    print(f"├─ 💳 USDC Borrowed        : {usdc_borrowed:.8f}")
+    print(f"├─ 📉 Total Debt           : {total_debt:.8f}")
+    print(f"├─ ⚖️ Margin Level         : {margin_level}")
+    print("──────────────────────────────────────────────")
+
+    snapshot = {"totalBalanceUSDC": round(total_balance_usdc, 8), "usdcBalance": round(usdc_balance, 8), "usdcBorrowed": round(usdc_borrowed, 8), "totalDebt": round(total_debt, 8), "marginLevel": float(acc["marginLevel"])}
+    return snapshot
+
+def borrow(amount: float):
+    print(f"📥 ADMIN BORROW requested: {amount} USDC")
+
+    if amount <= 0:
+        raise ValueError("Borrow amount must be > 0")
+
+    acc = get_margin_account()
+    margin_level = float(acc["marginLevel"])
+    print(f"🧮 Current Margin Level: {margin_level:.2f}")
+
+    if margin_level < 2:
+        raise Exception("Margin level too low to safely borrow USDC")
+
+    params = {"asset": "USDC", "amount": format(amount, "f"), "timestamp": _now_ms()}
+
+    resp = send_signed_request("POST", "/sapi/v1/margin/loan", params)
+
+    print(f"✅ BORROW completed: {amount} USDC")
+    return resp
+
+def repay(amount):
+    print(f"💳 ADMIN REPAY requested: {amount}")
+
+    # 1️⃣ Si amount == "all", calculamos la deuda real
+    if isinstance(amount, str) and amount.lower() == "all":
+        margin_info = get_margin_account()
+
+        borrowed_usdc = Decimal("0")
+        for asset in margin_info["userAssets"]:
+            if asset["asset"] == "USDC":
+                borrowed_usdc = Decimal(asset["borrowed"])
+                break
+
+        if borrowed_usdc <= 0:
+            print("ℹ️ No USDC debt to repay")
+            return {"status": "nothing_to_repay"}
+
+        amount = borrowed_usdc
+        print(f"🔁 REPAY ALL → {amount} USDC")
+
+    # 2️⃣ Validación normal
+    amount = Decimal(str(amount))
+    if amount <= 0:
+        raise ValueError("Repay amount must be > 0")
+
+    # 3️⃣ Llamada a Binance
+    params = {"asset": "USDC", "amount": format(amount, "f"), "timestamp": _now_ms()}
+
+    resp = send_signed_request("POST", "/sapi/v1/margin/repay", params)
+
+    print(f"✅ REPAY completed: {amount} USDC")
+    return resp
+
+def get_btc_usdc_price():
+    r = requests.get(f"{BASE_URL}/api/v3/ticker/price", params={"symbol": "BTCUSDC"}, timeout=5)
+    return float(r.json()["price"])
 
 def get_margin_account():
     print("📊 Fetching margin account info...")
@@ -537,48 +615,16 @@ def get_margin_account():
     acc = send_signed_request("GET", "/sapi/v1/margin/account", params)
     return acc
 
-def sell_residual_asset(symbol: str, free_qty: Decimal):
-    asset = symbol.replace("USDC", "")
-    print(f"💱 Selling residual {free_qty} {asset} → USDC")
 
-    min_qty, step_size = get_symbol_filters(symbol)
-    if free_qty < min_qty:
-        print(f"⏭️ Skipping {symbol}: {free_qty} < minQty ({min_qty})")
-        return
+# ====== CENSORING KEYS ======
+SENSITIVE_FIELDS = {"admin_key", "trading_key"}
 
-    qty = (free_qty // step_size) * step_size
-    qty_str = format(qty, "f")
-
-    payload = {"symbol": symbol, "side": "SELL", "type": "MARKET", "quantity": qty_str}
-
-    try:
-        send_signed_request("POST", "/sapi/v1/margin/order", payload)
-        print(f"✅ Sold {qty_str} {asset} to USDC")
-    except Exception as e:
-        print(f"⚠️ Could not sell {symbol}: {e}")
-
-
-def get_symbol_price(symbol: str) -> float:
-    ticker = send_signed_request("GET", "/api/v3/ticker/price", {"symbol": symbol})
-    return float(ticker["price"])
-
-_symbol_filters_cache = {}
-
-def get_symbol_filters(symbol):
-    if symbol in _symbol_filters_cache:
-        return _symbol_filters_cache[symbol]
-
-    info = send_signed_request("GET", "/api/v3/exchangeInfo", {})
-    for s in info["symbols"]:
-        if s["symbol"] == symbol:
-            for f in s["filters"]:
-                if f["filterType"] == "LOT_SIZE":
-                    min_qty = Decimal(f["minQty"])
-                    step_size = Decimal(f["stepSize"])
-                    _symbol_filters_cache[symbol] = (min_qty, step_size)
-                    return min_qty, step_size
-
-    raise Exception(f"Filters not found for {symbol}")
+def sanitize_payload(payload: dict) -> dict:
+    clean = payload.copy()
+    for field in SENSITIVE_FIELDS:
+        if field in clean:
+            clean[field] = "***REDACTED***"
+    return clean
 
 
 # ====== FLASK WEBHOOK ======
@@ -592,9 +638,9 @@ def webhook():
     if not data:
         return jsonify({"error": "Empty payload"}), 400
 
-    print(f"📩 Webhook received: {data}")
+    print(f"📩 Webhook received: {sanitize_payload(data)}")
 
-    # 🔐 ADMIN / CONTROL MODE
+    # 🔐 ADMIN MODE
     if "action" in data:
         action = data["action"].upper()
 
@@ -605,27 +651,51 @@ def webhook():
 
         print(f"🛠️ ADMIN ACTION RECEIVED: {action}")
 
-        if action == "CANCEL_ALL_ORDERS":
-            cancel_all_margin_orders()
-            return jsonify({"status": "ok", "action": action}), 200
+        if action == "CLEAR":
+            clear()
+            return jsonify({"status": "ok", "action": action, "result": result}), 200
 
-        elif action == "REPAY_ALL_DEBTS":
-            repay_all_margin_debts()
-            return jsonify({"status": "ok", "action": action}), 200
+        if action == "READ":
+            snapshot = read()
+            return jsonify(snapshot), 200
 
-        elif action == "CONVERT_ALL_TO_USDC":
-            convert_all_assets_to_usdc()
-            return jsonify({"status": "ok", "action": action}), 200
+        if action == "BORROW":
+            amount = float(data.get("amount", 0))
+            borrow(amount)
+            return jsonify({"status": "ok", "action": action, "amount": amount}), 200
+
+        if action == "REPAY":
+            amount = data.get("amount", 0)
+            if isinstance(amount, str):
+                amount = amount.lower()
+            repay(amount)
+            return jsonify({"status": "ok", "action": action, "amount": amount}), 200
 
         else:
+            print("❓ Unknown action")
             return jsonify({"error": "Unknown action"}), 400
 
     # 📈 TRADING MODE (TradingView)
     if "symbol" not in data or "side" not in data:
+        print("❓ Missing trading fields")
         return jsonify({"error": "Missing trading fields"}), 400
+
+    if TRADING_KEY:
+        if data.get("trading_key") != TRADING_KEY:
+            print("🚫 Invalid or missing trading_key")
+            return jsonify({"status": "blocked", "reason": "invalid trading key"}), 403
 
     symbol = data["symbol"]
     side = data["side"].upper()
+
+    # 🧮 CHECK MARGIN LEVEL
+    if not check_margin_level():
+        print("⛔ Trading blocked by margin safety system (critical)")
+        return jsonify({"status": "blocked", "reason": "margin critical"}), 200
+
+    if TRADING_BLOCKED:
+        print("⛔ Trading blocked by margin safety system")
+        return jsonify({"status": "blocked", "reason": "margin protection"}), 200
 
     handle_pre_trade_cleanup(symbol)
 
