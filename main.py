@@ -493,7 +493,24 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
 
 
 # ====== ADMIN FUNCTIONS ======
-def clear():
+MILESTONES_USDC = [500, 1000, 2000, 5000, 10000, 25000, 50000]
+REACHED_MILESTONES = set()
+
+def check_milestones(total_balance_usdc: float):
+    for milestone in MILESTONES_USDC:
+        if total_balance_usdc >= milestone and milestone not in REACHED_MILESTONES:
+            REACHED_MILESTONES.add(milestone)
+
+            print(
+                f"🎉🎉 CONGRATS! 🎉🎉\n"
+                f"💰 You reached {milestone:,.0f} USDC\n"
+                f"🚀 Keep it up. Compounding is working.\n"
+                f"🔥 Discipline > Luck\n"
+            )
+
+
+# ====== ADMIN FUNCTIONS ======
+def clear(): 
     print("🔁 Converting ALL assets to USDC...")
     account = get_margin_account()
 
@@ -510,7 +527,7 @@ def clear():
         symbol = f"{asset_name}USDC"
 
         try:
-            print(f"↪ Clearing {free_qty} {asset_name}")
+            print(f"↪ Clearing {free_qty} {asset_name}") 
             handle_pre_trade_cleanup(symbol)
             cleared_symbols.append(symbol)
         except Exception as e:
@@ -518,8 +535,11 @@ def clear():
             failed_symbols.append({"symbol": symbol, "error": str(e)})
 
     print("✅ CLEAR completed")
+    except Exception as e:
+        failed_symbols.append({"symbol": symbol, "error": str(e)})
+
     return {"cleared": cleared_symbols, "failed": failed_symbols}
-    
+
 def read():
     print("📊 Reading Cross Margin account snapshot...")
 
@@ -550,6 +570,7 @@ def read():
     print("──────────────────────────────────────────────")
 
     snapshot = {"totalBalanceUSDC": round(total_balance_usdc, 8), "usdcBalance": round(usdc_balance, 8), "usdcBorrowed": round(usdc_borrowed, 8), "totalDebt": round(total_debt, 8), "marginLevel": float(acc["marginLevel"])}
+    check_milestones(total_balance_usdc)
     return snapshot
 
 def borrow(amount: float):
