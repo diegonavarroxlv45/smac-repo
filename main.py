@@ -515,10 +515,10 @@ def clear():
             cleared_symbols.append(symbol)
         except Exception as e:
             print(f"⚠️ Could not convert {symbol}: {e}")
-            failed.append({"symbol": symbol, "error": str(e)})
+            failed_symbols.append({"symbol": symbol, "error": str(e)})
 
     print("✅ CLEAR completed")
-    return failed.append({"symbol": symbol, "error": str(e)})
+    return failed_symbols.append({"symbol": symbol, "error": str(e)})
 
 def read():
     print("📊 Reading Cross Margin account snapshot...")
