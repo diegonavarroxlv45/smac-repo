@@ -518,7 +518,10 @@ def clear():
             failed_symbols.append({"symbol": symbol, "error": str(e)})
 
     print("✅ CLEAR completed")
-    return failed_symbols.append({"symbol": symbol, "error": str(e)})
+    except Exception as e:
+        failed_symbols.append({"symbol": symbol, "error": str(e)})
+
+    return {"cleared": cleared_symbols, "failed": failed_symbols}
 
 def read():
     print("📊 Reading Cross Margin account snapshot...")
@@ -652,7 +655,7 @@ def webhook():
         print(f"🛠️ ADMIN ACTION RECEIVED: {action}")
 
         if action == "CLEAR":
-            clear()
+            result = clear()
             return jsonify({"status": "ok", "action": action, "result": result}), 200
 
         if action == "READ":
