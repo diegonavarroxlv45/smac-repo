@@ -31,7 +31,7 @@ print("🔐 Binance API credentials loaded successfully")
 
 RETRY_AMOUNT = int(os.getenv("RETRY_AMOUNT", "3"))
 RETRY_AMOUNT = max(0, min(RETRY_AMOUNT, 5))
-RISK_PCT = float(os.getenv("RISK_PCT", "0.05"))
+DEFAULT_RISK_PCT = float(os.getenv("DEFAULT_RISK_PCT", "0.05"))
 STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.98"))
 TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", "1.04"))
 COMMISSION_BUFFER = Decimal(os.getenv("COMMISSION_BUFFER", "0.999"))
@@ -42,8 +42,7 @@ app = Flask(__name__)
 
 # ===== GLOBAL RISK STATE =====
 TRADING_BLOCKED = False
-DEFAULT_RISK_PCT = 0.05
-RISK_PCT = DEFAULT_RISK_PCT
+MARGIN_MAX_RISK_PCT = DEFAULT_RISK_PCT
 
 
 # ====== AUXILIAR FUNCTIONS ======
@@ -93,6 +92,23 @@ def floor_to_step_str(value, step_str):
     return format(q, f".{decimals}f")
 
 
+# ===== FINAL RISK RESOLUTION =====
+def resolve_risk_pct(webhook_data=None):
+    """
+    Final risk = min(strategy risk, margin allowed risk)
+    """
+
+    risk_pct = DEFAULT_RISK_PCT
+
+    if webhook_data and "risk_pct" in webhook_data:
+        try:
+            risk_pct = float(webhook_data["risk_pct"])
+        except Exception:
+            print("⚠️ Invalid risk_pct from webhook, using default")
+
+    final_risk = min(risk_pct, MARGIN_MAX_RISK_PCT)
+    return final_risk
+
 # ====== BALANCE & MARKET DATA ======
 def get_balance_margin(asset="USDC") -> float:
     ts = _now_ms()
@@ -132,7 +148,7 @@ def format_price_to_tick(price: float, tick_size_str: str, rounding=ROUND_DOWN) 
 
 # ===== CHECK MARGIN LEVEL BEFORE OPERATING =====
 def check_margin_level():
-    global TRADING_BLOCKED, RISK_PCT
+    global TRADING_BLOCKED, MARGIN_MAX_RISK_PCT
 
     try:
         account_info = get_margin_account()
@@ -146,24 +162,25 @@ def check_margin_level():
             clear()
             return False
 
-        # 🔴 EMERGENCY — REDUCE RISK + BLOCK NEW ENTRIES
+        # 🔴 EMERGENCY — BLOCK NEW ENTRIES
         elif margin_level < 1.25:
             print("🔴 DANGER! Margin < 1.25 — BLOCKING NEW ENTRIES")
             TRADING_BLOCKED = True
             return True
 
-        # 🟠 DEFENSIVE — FREEZE SYSTEM
+        # 🟠 DEFENSIVE — LIMIT MAX RISK
         elif margin_level < 2:
-            print("🟠 WARNING! Margin < 2 — REDUCING RISK")
-            RISK_PCT = 0.02
+            print("🟠 WARNING! Margin < 2 — LIMITING MAX RISK TO 2%")
+            MARGIN_MAX_RISK_PCT = 0.02
             return True
 
+        # 🟢 HEALTHY
         else:
             if TRADING_BLOCKED:
                 print("✅ Margin recovered — resuming normal operation")
 
             TRADING_BLOCKED = False
-            RISK_PCT = DEFAULT_RISK_PCT
+            MARGIN_MAX_RISK_PCT = DEFAULT_RISK_PCT
             print("✅ Margin level healthy")
             return True
 
@@ -304,7 +321,8 @@ def handle_pre_trade_cleanup(symbol: str):
 def execute_long_margin(symbol, webhook_data=None):
     lot = get_symbol_lot(symbol)
     balance_usdc = get_balance_margin("USDC")
-    qty_quote = balance_usdc * RISK_PCT
+    risk_pct = resolve_risk_pct(webhook_data)
+    qty_quote = balance_usdc * risk_pct
 
     params = {"symbol": symbol, "side": "BUY", "type": "MARKET", "quoteOrderQty": floor_to_step_str(qty_quote, lot["tickSize_str"]), "timestamp": _now_ms()}
 
@@ -357,7 +375,8 @@ def execute_short_margin(symbol, webhook_data=None):
         print("⚠️ Price estimate invalid, aborting short.")
         return {"error": "invalid_price_est"}
 
-    raw_qty = Decimal(str(balance_usdc * RISK_PCT)) / Decimal(str(price_est))
+    risk_pct = resolve_risk_pct(webhook_data)
+    raw_qty = Decimal(str(balance_usdc * risk_pct)) / Decimal(str(price_est))
     borrow_amount = float(raw_qty.quantize(Decimal(str(lot["stepSize_str"])), rounding=ROUND_DOWN))
 
     if borrow_amount <= 0 or borrow_amount < lot.get("minQty", 0.0):
@@ -492,7 +511,7 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
         return False
 
 
-# ====== ADMIN FUNCTIONS ======
+# ====== MILESTONES ======
 MILESTONES_USDC = [500, 1000, 2000, 5000, 10000, 25000, 50000]
 REACHED_MILESTONES = set()
 
@@ -593,7 +612,6 @@ def borrow(amount: float):
 def repay(amount):
     print(f"💳 ADMIN REPAY requested: {amount}")
 
-    # 1️⃣ Si amount == "all", calculamos la deuda real
     if isinstance(amount, str) and amount.lower() == "all":
         margin_info = get_margin_account()
 
@@ -610,12 +628,10 @@ def repay(amount):
         amount = borrowed_usdc
         print(f"🔁 REPAY ALL → {amount} USDC")
 
-    # 2️⃣ Validación normal
     amount = Decimal(str(amount))
     if amount <= 0:
         raise ValueError("Repay amount must be > 0")
 
-    # 3️⃣ Llamada a Binance
     params = {"asset": "USDC", "amount": format(amount, "f"), "timestamp": _now_ms()}
 
     resp = send_signed_request("POST", "/sapi/v1/margin/repay", params)
@@ -716,6 +732,12 @@ def webhook():
         return jsonify({"status": "blocked", "reason": "margin protection"}), 200
 
     handle_pre_trade_cleanup(symbol)
+
+    check_margin_level()
+
+    if TRADING_BLOCKED:
+        print("⛔ Trading blocked due to margin protection")
+        return jsonify({"status": "blocked_by_margin"}), 200
 
     if side == "BUY":
         resp = execute_long_margin(symbol, webhook_data=data)
