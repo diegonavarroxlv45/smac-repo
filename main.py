@@ -1,3 +1,11 @@
+#   ███████╗   ██████╗   ███╗   ██╗  ████████╗
+#   ██╔════╝  ██╔════╝   ████╗  ██║  ╚══██╔══╝
+#   ███████╗  ██║  ███╗  ██╔██╗ ██║     ██║
+#   ╚════██║  ██║   ██║  ██║╚██╗██║     ██║
+#   ███████║  ╚██████╔╝  ██║ ╚████║     ██║
+#   ╚══════╝   ╚═════╝   ╚═╝  ╚═══╝     ╚═╝
+
+# ====== IMPORTS ======
 import os
 import time
 import math
@@ -9,10 +17,48 @@ from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from flask import Flask, request, jsonify
 
 # ====== SETTINGS ======
+print = functools.partial(print, flush=True)
+app = Flask(__name__)
+
+
+# ====== VARIABLES ======
+# --- ENVIRONMENT VARIABLES ---
+RETRIES = int(os.getenv("RETRIES", "3"))
+DEFAULT_RISK_PCT = float(os.getenv("DEFAULT_RISK_PCT", "5"))
+MAX_RISK_PCT = float(os.getenv("MAX_RISK_PCT", "20"))
+SL_PCT = float(os.getenv("SL_PCT", "2"))
+TP_PCT = float(os.getenv("TP_PCT", "4"))
+COMMISSION = Decimal(os.getenv("COMMISSION", "0.1"))
+MIN_BOOT_SECS = int(os.getenv("MIN_BOOT_SECS", "60"))
+DEPLOY_GRACE_PERIOD = int(os.getenv("DEPLOY_GRACE_PERIOD", "120"))
+PORT = int(os.getenv("PORT", "5000"))
+
+# --- VARIABLE LIMITS ---
+RETRIES = max(0, min(RETRIES, 5))
+MAX_RISK_PCT = max(0, min(MAX_RISK_PCT, 20))
+DEFAULT_RISK_PCT = max(0, min(DEFAULT_RISK_PCT, MAX_RISK_PCT))
+SL_PCT = max(0, min(SL_PCT, 50))
+TP_PCT = max(0, min(TP_PCT, 50))
+COMMISSION = max(0, min(COMMISSION, 100))
+MIN_BOOT_SECS = max(0, min(MIN_BOOT_SECS, 180))
+DEPLOY_GRACE_PERIOD = max(0, min(DEPLOY_GRACE_PERIOD, 240))
+
+# --- BOOL VARIABLES ---
+TESTNET = os.getenv("TESTNET", "false").lower() == "true"
+TRADING_ENABLED = os.getenv("TRADING_ENABLED", "true").lower() == "true"
+SL_OVERRIDE = os.getenv("SL_OVERRIDE", "true").lover() == "true"
+TP_OVERRIDE = os.getenv("TP_OVERRIDE", "true").lower() == "true"
+
+# --- SECRET VARIABLES ---
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
+TESTNET_API_KEY = os.getenv("TESTNET_API_KEY")
+TESTNET_API_SECRET = os.getenv("TESTNET_API_SECRET")
 TRADING_KEY = os.getenv("TRADING_KEY")
 ADMIN_KEY = os.getenv("ADMIN_KEY")
+
+
+# ====== APIS ======
 BASE_URL = "https://api.binance.com"
 
 if not BINANCE_API_KEY and not BINANCE_API_SECRET:
@@ -27,37 +73,152 @@ if not BINANCE_API_SECRET:
     print("❌ BINANCE_API_SECRET is NOT defined")
     raise RuntimeError("Missing BINANCE_API_SECRET")
 
-print("🔐 Binance API credentials loaded successfully")
+else:
+    print("🔐 Binance API credentials loaded successfully")
 
-RETRY_AMOUNT = int(os.getenv("RETRY_AMOUNT", "3"))
-RETRY_AMOUNT = max(0, min(RETRY_AMOUNT, 5))
-DEFAULT_RISK_PCT = float(os.getenv("DEFAULT_RISK_PCT", "0.05"))
-STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.98"))
-TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", "1.04"))
-COMMISSION_BUFFER = Decimal(os.getenv("COMMISSION_BUFFER", "0.999"))
-DRY_RUN = os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes")
+if not TESTNET_API_KEY and not TESTNET_API_SECRET:
+    print("❌ TESTNET_API_KEY and TESTNET_API_SECRET are NOT defined")
+    raise RuntimeError("Missing Testnet API credentials")
 
-print = functools.partial(print, flush=True)
-app = Flask(__name__)
+if not TESTNET_API_KEY:
+    print("❌ BINANCE_API_KEY is NOT defined")
+    raise RuntimeError("Missing TESTNET_API_KEY")
 
-# ===== GLOBAL RISK STATE =====
+if not TESTNET_API_SECRET:
+    print("❌ TESTNET_API_SECRET is NOT defined")
+    raise RuntimeError("Missing TESTNET_API_SECRET")
+
+else:
+    print("🔐 Testnet API credentials loaded successfully")
+
+if TESTNET:
+    BINANCE_API_KEY = os.getenv("TESTNET_API_KEY")
+    BINANCE_API_SECRET = os.getenv("TESTNET_API_SECRET")
+    BASE_URL = "https://testnet.binance.vision"
+else:
+    BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
+    BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
+    BASE_URL = "https://api.binance.com"
+
+
+# ====== SAFE DEPLOYMENT PATTERN ======
+BOOT_TIME = time.time()
+BOT_READY = False
+
+# --- BASIC CONNECTIVITY CHECK ---
+def _check_binance_connectivity():
+    try:
+        send_public_request("GET", "/api/v3/time")
+        return True
+    except Exception as e:
+        print(f"❌ Binance connectivity failed: {e}")
+        return False
+
+# --- PUBLIC BINANCE REQUEST ---
+def send_public_request(http_method: str, path: str, params=None):
+    """
+    Sends unsigned request to Binance public endpoints.
+    Works for REAL and TESTNET automatically via BASE_URL.
+    """
+    url = f"{BASE_URL}{path}"
+
+    try:
+        return _request_with_retries(
+            http_method,
+            url,
+            params=params
+        )
+    except Exception as e:
+        print(f"⚠️ Public request failed {path}: {e}")
+        raise
+
+# --- ACCOUNT ACCESS CHECK ---
+def _check_account_access():
+    try:
+        get_balance_margin("USDC")
+        return True
+    except Exception as e:
+        print(f"❌ Account access failed: {e}")
+        return False
+
+# --- GLOBAL HEALTH CHECK ---
+def health_check():
+    print("🩺 Running health check...")
+
+    if not _check_binance_connectivity():
+        return False
+
+    if not _check_account_access():
+        return False
+
+    print("✅ Health check passed")
+    return True
+
+# --- BOT READINESS STATE MACHINE ---
+def is_bot_ready():
+    global BOT_READY
+
+    if not TRADING_ENABLED:
+        print("🛑 Trading manually disabled (TRADING_ENABLED=false)")
+        return False
+
+    if BOT_READY:
+        return True
+
+    uptime = time.time() - BOOT_TIME
+
+    if uptime < MIN_BOOT_SECS:
+        print(f"⏳ Boot protection active ({int(uptime)}s/{MIN_BOOT_SECS}s)")
+        return False
+
+    if uptime < DEPLOY_GRACE_PERIOD:
+        print(f"🟡 Deploy grace period ({int(uptime)}s/{DEPLOY_GRACE_PERIOD}s)")
+        return False
+
+    if not health_check():
+        print("⚠️ Bot not healthy yet")
+        return False
+
+    BOT_READY = True
+    print("🚀 BOT READY — trading ENABLED")
+
+    return True
+
+# --- SAFE EXECUTION GUARD ---
+def trading_guard():
+    """
+    Call this BEFORE executing ANY trade.
+    """
+    if not is_bot_ready():
+        return False, (
+            jsonify({
+                "status": "booting_or_unhealthy",
+                "trading_enabled": TRADING_ENABLED
+            }),
+            200
+        )
+
+    return True, None
+
+
+# ====== GLOBAL RISK STATE ======
 TRADING_BLOCKED = False
-MARGIN_MAX_RISK_PCT = DEFAULT_RISK_PCT
+MARGIN_MAX_RISK_PCT = MAX_RISK_PCT
 
 
-# ====== AUXILIAR FUNCTIONS ======
+# ====== TIME FUNCTION ======
 def _now_ms():
     return int(time.time() * 1000)
 
 
+# ====== SIGNING AND REQUESTING ======
 def sign_params_query(params: dict, secret: str):
     query = "&".join([f"{k}={v}" for k, v in params.items()])
     signature = hmac.new(secret.encode(), query.encode(), hashlib.sha256).hexdigest()
     return query, signature
 
-
 def _request_with_retries(method: str, url: str, **kwargs):
-    for i in range(RETRY_AMOUNT):
+    for i in range(RETRIES):
         try:
             resp = requests.request(method, url, timeout=10, **kwargs)
             if resp.status_code == 200:
@@ -72,7 +233,6 @@ def _request_with_retries(method: str, url: str, **kwargs):
         time.sleep(1)
     raise Exception("❌ Request failed after retries")
 
-
 def send_signed_request(http_method: str, path: str, payload: dict):
     if "timestamp" not in payload:
         payload["timestamp"] = _now_ms()
@@ -83,20 +243,8 @@ def send_signed_request(http_method: str, path: str, payload: dict):
     return _request_with_retries(http_method, url, headers=headers)
 
 
-def floor_to_step_str(value, step_str):
-    step = Decimal(str(step_str))
-    v = Decimal(str(value))
-    n = (v // step) * step
-    decimals = -step.as_tuple().exponent if step.as_tuple().exponent < 0 else 0
-    q = n.quantize(Decimal(1).scaleb(-decimals))
-    return format(q, f".{decimals}f")
-
-
-# ===== FINAL RISK RESOLUTION =====
+# ====== FINAL RISK RESOLUTION ======
 def resolve_risk_pct(webhook_data=None):
-    """
-    Final risk = min(strategy risk, margin allowed risk)
-    """
 
     risk_pct = DEFAULT_RISK_PCT
 
@@ -104,10 +252,12 @@ def resolve_risk_pct(webhook_data=None):
         try:
             risk_pct = float(webhook_data["risk_pct"])
         except Exception:
-            print("⚠️ Invalid risk_pct from webhook, using default")
+            print("⚠️ Invalid risk_pct from webhook")
 
-    final_risk = min(risk_pct, MARGIN_MAX_RISK_PCT)
-    return final_risk
+    risk_pct = min(risk_pct, MARGIN_MAX_RISK_PCT)
+
+    return risk_pct / 100
+
 
 # ====== BALANCE & MARKET DATA ======
 def get_balance_margin(asset="USDC") -> float:
@@ -116,13 +266,9 @@ def get_balance_margin(asset="USDC") -> float:
     q, sig = sign_params_query(params, BINANCE_API_SECRET)
     url = f"{BASE_URL}/sapi/v1/margin/account?{q}&signature={sig}"
     headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
-    if DRY_RUN:
-        print(f"[DRY_RUN] get_balance_margin({asset}) -> simulated 1000")
-        return 1000.0
     data = _request_with_retries("GET", url, headers=headers)
     bal = next((b for b in data.get("userAssets", []) if b["asset"] == asset), None)
     return float(bal["free"]) if bal else 0.0
-
 
 def get_symbol_lot(symbol):
     data = _request_with_retries("GET", f"{BASE_URL}/api/v3/exchangeInfo")
@@ -145,8 +291,19 @@ def format_price_to_tick(price: float, tick_size_str: str, rounding=ROUND_DOWN) 
     decimals = -d_tick.as_tuple().exponent if d_tick.as_tuple().exponent < 0 else 0
     return f"{p:.{decimals}f}"
 
+def floor_to_step_str(value, step_str):
+    step = Decimal(str(step_str))
+    v = Decimal(str(value))
+    n = (v // step) * step
+    decimals = -step.as_tuple().exponent if step.as_tuple().exponent < 0 else 0
+    q = n.quantize(Decimal(1).scaleb(-decimals))
+    return format(q, f".{decimals}f")
 
-# ===== CHECK MARGIN LEVEL BEFORE OPERATING =====
+def tick_decimals(tick_str: str):
+    return len(tick_str.rstrip('0').split('.')[-1])
+
+
+# ====== CHECK MARGIN LEVEL BEFORE OPERATING ======
 def check_margin_level():
     global TRADING_BLOCKED, MARGIN_MAX_RISK_PCT
 
@@ -171,7 +328,7 @@ def check_margin_level():
         # 🟠 DEFENSIVE — LIMIT MAX RISK
         elif margin_level < 2:
             print("🟠 WARNING! Margin < 2 — LIMITING MAX RISK TO 2%")
-            MARGIN_MAX_RISK_PCT = 0.02
+            MARGIN_MAX_RISK_PCT = 2
             return True
 
         # 🟢 HEALTHY
@@ -180,7 +337,7 @@ def check_margin_level():
                 print("✅ Margin recovered — resuming normal operation")
 
             TRADING_BLOCKED = False
-            MARGIN_MAX_RISK_PCT = DEFAULT_RISK_PCT
+            MARGIN_MAX_RISK_PCT = MAX_RISK_PCT
             print("✅ Margin level healthy")
             return True
 
@@ -325,11 +482,6 @@ def execute_long_margin(symbol, webhook_data=None):
     qty_quote = balance_usdc * risk_pct
 
     params = {"symbol": symbol, "side": "BUY", "type": "MARKET", "quoteOrderQty": floor_to_step_str(qty_quote, lot["tickSize_str"]), "timestamp": _now_ms()}
-
-    if DRY_RUN:
-        print(f"[DRY_RUN] Margin LONG {symbol}: quoteOrderQty={qty_quote}")
-        return {"dry_run": True}
-
     resp = send_signed_request("POST", "/sapi/v1/margin/order", params)
 
     executed_qty = 0.0
@@ -358,7 +510,6 @@ def execute_long_margin(symbol, webhook_data=None):
         place_sl_tp_margin(symbol, "BUY", entry_price, executed_qty, lot, sl_override=sl_from_web, tp_override=tp_from_web)
 
     return {"order": resp}
-
 
 def execute_short_margin(symbol, webhook_data=None):
     lot = get_symbol_lot(symbol)
@@ -390,16 +541,12 @@ def execute_short_margin(symbol, webhook_data=None):
         return {"error": "notional_too_small", "detail": msg}
 
     borrow_params = {"asset": symbol.replace("USDC", ""), "amount": format(Decimal(str(borrow_amount)), "f"), "timestamp": _now_ms()}
-    if DRY_RUN:
-        print(f"[DRY_RUN] Borrow {borrow_params}")
-        borrowed_qty = borrow_amount
+    borrow_resp = send_signed_request("POST", "/sapi/v1/margin/loan", borrow_params)
+    borrowed_qty = None
+    if isinstance(borrow_resp, dict):
+        borrowed_qty = float(borrow_resp.get("amount") or borrow_resp.get("qty") or borrow_amount)
     else:
-        borrow_resp = send_signed_request("POST", "/sapi/v1/margin/loan", borrow_params)
-        borrowed_qty = None
-        if isinstance(borrow_resp, dict):
-            borrowed_qty = float(borrow_resp.get("amount") or borrow_resp.get("qty") or borrow_amount)
-        else:
-            borrowed_qty = borrow_amount
+        borrowed_qty = borrow_amount
 
     print(f"📥 Borrowed {borrowed_qty} {symbol.replace('USDC','')} (requested {borrow_amount})")
 
@@ -410,11 +557,6 @@ def execute_short_margin(symbol, webhook_data=None):
         return {"error": "borrowed_qty_too_small", "detail": msg}
 
     params = {"symbol": symbol, "side": "SELL", "type": "MARKET", "quantity": qty_str, "timestamp": _now_ms()}
-
-    if DRY_RUN:
-        print(f"[DRY_RUN] Margin SHORT {symbol}: quantity={qty_str}")
-        return {"dry_run": True}
-
     resp = send_signed_request("POST", "/sapi/v1/margin/order", params)
 
     executed_qty = 0.0
@@ -445,69 +587,166 @@ def execute_short_margin(symbol, webhook_data=None):
     return {"order": resp}
 
 
-# ====== SL/TP FUNCTIONS (OCO VERSION) ======
+# ====== SL/TP FUNCTIONS ======
 def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty: float, lot: dict, sl_override=None, tp_override=None):
     try:
+        COMMISSION_BUFFER = Decimal("1") - (COMMISSION / Decimal("100"))
         oco_side = "SELL" if side == "BUY" else "BUY"
 
+        # === Determine if SL/TP should be used ===
+        use_sl = sl_override is not None or (SL_OVERRIDE and SL_PCT is not None)
+        use_tp = tp_override is not None or (TP_OVERRIDE and TP_PCT is not None)
+
+        if not use_sl and not use_tp:
+            print(f"ℹ️ No SL/TP requested for {symbol}")
+            return True
+
         # === Price calculation ===
+
+        # ---- SL ----
         if sl_override is not None:
             sl_price = float(sl_override)
-            sl_rounding = ROUND_DOWN if side == "BUY" else ROUND_UP
-        else:
-            sl_price = entry_price * STOP_LOSS_PCT if side == "BUY" else entry_price / STOP_LOSS_PCT
-            sl_rounding = ROUND_DOWN if side == "BUY" else ROUND_UP
 
+        elif SL_OVERRIDE and SL_PCT is not None:
+            sl_price = entry_price * (1 - SL_PCT / 100) if side == "BUY" else entry_price * (1 + SL_PCT / 100)
+
+        else:
+            sl_price = None
+
+
+        # ---- TP ----
         if tp_override is not None:
             tp_price = float(tp_override)
-            tp_rounding = ROUND_UP if side == "BUY" else ROUND_DOWN
-        else:
-            tp_price = entry_price * TAKE_PROFIT_PCT if side == "BUY" else entry_price / TAKE_PROFIT_PCT
-            tp_rounding = ROUND_UP if side == "BUY" else ROUND_DOWN
 
-        # === tickSize adjusting ===
-        sl_price_str = format_price_to_tick(sl_price, lot["tickSize_str"], rounding=sl_rounding)
-        tp_price_str = format_price_to_tick(tp_price, lot["tickSize_str"], rounding=tp_rounding)
+        elif TP_OVERRIDE and TP_PCT is not None:
+            tp_price = entry_price * (1 + TP_PCT / 100) if side == "BUY" else entry_price * (1 - TP_PCT / 100)
+
+        else:
+            tp_price = None
+
+        # === Tick alignment function ===
+        def align_price(price: float, tick_str: str, rounding):
+            tick = float(tick_str)
+            if rounding == ROUND_DOWN:
+                return math.floor(price / tick) * tick
+            else:
+                return math.ceil(price / tick) * tick
+
+        decimals = lot["tickSize_str"].split('.')[-1].find('1')
+        if decimals < 0:
+            decimals = 8  # fallback
+
+        # === Align SL/TP to tickSize ===
+        sl_price_str = None
+        tp_price_str = None
+        stop_limit_price = None
+
+        if sl_price is not None:
+            sl_rounding = ROUND_DOWN if side == "BUY" else ROUND_UP
+            sl_price_aligned = align_price(sl_price, lot["tickSize_str"], sl_rounding)
+            sl_price_str = f"{sl_price_aligned:.{decimals}f}"
+
+            # stopLimitPrice: slightly inside SL to satisfy Binance
+            if side == "BUY":
+                stop_limit_aligned = align_price(sl_price_aligned * 0.999, lot["tickSize_str"], ROUND_DOWN)
+            else:
+                stop_limit_aligned = align_price(sl_price_aligned * 1.001, lot["tickSize_str"], ROUND_UP)
+            stop_limit_price = f"{stop_limit_aligned:.{decimals}f}"
+
+        if tp_price is not None:
+            tp_rounding = ROUND_UP if side == "BUY" else ROUND_DOWN
+            tp_price_aligned = align_price(tp_price, lot["tickSize_str"], tp_rounding)
+            tp_price_str = f"{tp_price_aligned:.{decimals}f}"
+
+        # === Quantity alignment ===
         qty_str = floor_to_step_str(executed_qty * float(COMMISSION_BUFFER), lot["stepSize_str"])
         qty_f = float(qty_str)
 
+        # === Decide order type ===
+        if sl_price_str and tp_price_str:
+            order_type = "OCO"
+        elif sl_price_str:
+            order_type = "SL_ONLY"
+        elif tp_price_str:
+            order_type = "TP_ONLY"
+
         # === Basic validations ===
         for label, price_str in [("SL", sl_price_str), ("TP", tp_price_str)]:
-            try:
-                price_f = float(price_str)
-            except Exception:
-                print(f"⚠️ {label} price malformed for {symbol}: {price_str}, skipping")
-                return False
-
+            if price_str is None:
+                continue
+            price_f = float(price_str)
             if price_f <= 0 or price_f < lot["tickSize"]:
                 print(f"⚠️ Skipping {label} for {symbol}: price {price_f} < tickSize {lot['tickSize']}")
                 return False
-
             notional = price_f * qty_f
             if notional < lot.get("minNotional", 0.0):
                 print(f"⚠️ Skipping {label} for {symbol}: notional {notional:.8f} < minNotional {lot.get('minNotional')}")
                 return False
 
-        # === stopLimitPrice ===
-        stop_limit_raw = float(sl_price_str) * (0.999 if side == "BUY" else 1.001)
-        tick = float(lot["tickSize_str"])
-        stop_limit_aligned = math.floor(stop_limit_raw / tick) * tick
-        stop_limit_price = f"{stop_limit_aligned:.{lot['tickSize_str'].split('.')[-1].find('1')}f}"
+        # ===== Place OCO =====
+        if order_type == "OCO":
+            params = {
+                "symbol": symbol,
+                "side": oco_side,
+                "quantity": qty_str,
+                "price": tp_price_str,
+                "stopPrice": sl_price_str,
+                "stopLimitPrice": stop_limit_price,
+                "stopLimitTimeInForce": "GTC",
+                "timestamp": _now_ms()
+            }
+            try:
+                send_signed_request("POST", "/sapi/v1/margin/order/oco", params)
 
-        # === Create OCO ===
-        params = {"symbol": symbol, "side": oco_side, "quantity": qty_str, "price": tp_price_str, "stopPrice": sl_price_str, "stopLimitPrice": stop_limit_price, "stopLimitTimeInForce": "GTC", "timestamp": _now_ms()}
+                direction = 1 if side == "BUY" else -1
+                entry_f = float(entry_price)
+                tp_f = float(tp_price_str)
+                sl_f = float(sl_price_str)
+                profit_tp = (tp_f - entry_f) * qty_f * direction
+                loss_sl = (sl_f - entry_f) * qty_f * direction
+                rr = abs(profit_tp / loss_sl) if loss_sl != 0 else 0
 
-        try:
-            send_signed_request("POST", "/sapi/v1/margin/order/oco", params)
-            print(f"📌 OCO order placed for {symbol}: TP={tp_price_str}, SL={sl_price_str}, stopLimit={stop_limit_price} ({oco_side}), qty={qty_str}")
+                print(f"📌 OCO placed for {symbol}: TP={tp_price_str}, SL={sl_price_str}, stopLimit={stop_limit_price} ({oco_side}), qty={qty_str}")
+                print(f"🟢 TP PnL ≈ {profit_tp:.2f} USDC | 🔴 SL PnL ≈ {loss_sl:.2f} USDC | ⚖️ R:R {rr:.2f}")
+
+                return True
+            except Exception as e:
+                print(f"⚠️ Failed OCO for {symbol}, payload={params}: {e}")
+                return False
+
+        # ===== SL ONLY =====
+        if order_type == "SL_ONLY":
+            params = {
+                "symbol": symbol,
+                "side": oco_side,
+                "type": "STOP_LOSS_LIMIT",
+                "quantity": qty_str,
+                "price": stop_limit_price,
+                "stopPrice": sl_price_str,
+                "timeInForce": "GTC",
+                "timestamp": _now_ms()
+            }
+            send_signed_request("POST", "/sapi/v1/margin/order", params)
+            print(f"🛑 SL placed for {symbol}: stop={sl_price_str}, limit={stop_limit_price}, qty={qty_str}")
             return True
-        except Exception as e:
-            print(f"⚠️ send_signed_request failed for /sapi/v1/margin/order/oco payload={params}: {e}")
-            print(f"⚠️ Could not place OCO for {symbol}: {e}")
-            return False
+
+        # ===== TP ONLY =====
+        if order_type == "TP_ONLY":
+            params = {
+                "symbol": symbol,
+                "side": oco_side,
+                "type": "LIMIT",
+                "quantity": qty_str,
+                "price": tp_price_str,
+                "timeInForce": "GTC",
+                "timestamp": _now_ms()
+            }
+            send_signed_request("POST", "/sapi/v1/margin/order", params)
+            print(f"🎯 TP placed for {symbol}: price={tp_price_str}, qty={qty_str}")
+            return True
 
     except Exception as e:
-        print(f"⚠️ Could not place OCO SL/TP for {symbol}: {e}")
+        print(f"⚠️ Could not place SL/TP for {symbol}: {e}")
         return False
 
 
@@ -578,6 +817,8 @@ def read():
     margin_level = float(acc["marginLevel"])
 
     print("────────── 📊 ACCOUNT SNAPSHOT 📊 ──────────")
+    print(f"├─ 🤖 Trading Enabled      : {TRADING_ENABLED}")
+    print(f"├─ 🧪 Testnet Mode         : {TESTNET}")
     print(f"├─ 💰 Total Balance (USDC) : {total_balance_usdc:.8f}")
     print(f"├─ 💸 USDC Balance         : {usdc_balance:.8f}")
     print(f"├─ 💳 USDC Borrowed        : {usdc_borrowed:.8f}")
@@ -585,7 +826,14 @@ def read():
     print(f"├─ ⚖️ Margin Level         : {margin_level}")
     print("──────────────────────────────────────────────")
 
-    snapshot = {"totalBalanceUSDC": round(total_balance_usdc, 8), "usdcBalance": round(usdc_balance, 8), "usdcBorrowed": round(usdc_borrowed, 8), "totalDebt": round(total_debt, 8), "marginLevel": float(acc["marginLevel"])}
+    snapshot = {"TRADING_ENABLED": TRADING_ENABLED,
+                "TESTNET": TESTNET,
+                "totalBalanceUSDC": round(total_balance_usdc, 8),
+                "usdcBalance": round(usdc_balance, 8),
+                "usdcBorrowed": round(usdc_borrowed, 8),
+                "totalDebt": round(total_debt, 8),
+                "marginLevel": float(acc["marginLevel"])
+    }
     check_milestones(total_balance_usdc)
     return snapshot
 
@@ -639,6 +887,58 @@ def repay(amount):
     print(f"✅ REPAY completed: {amount} USDC")
     return resp
 
+def pause_trading():
+    global TRADING_ENABLED
+    TRADING_ENABLED = False
+    print("⏸️ ADMIN ACTION: Trading PAUSED")
+    return {"status": "ok", "trading_enabled": TRADING_ENABLED}
+
+def resume_trading():
+    global TRADING_ENABLED
+    TRADING_ENABLED = True
+    print("▶️ ADMIN ACTION: Trading RESUMED")
+    return {"status": "ok", "trading_enabled": TRADING_ENABLED}
+
+def testnet_on():
+    global TESTNET
+    TESTNET = True
+    print("🧪 ADMIN ACTION: TESTNET MODE ENABLED")
+    return {"status": "ok", "testnet": TESTNET}
+
+def testnet_off():
+    global TESTNET
+    TESTNET = False
+    print("🌐 ADMIN ACTION: LIVE MODE ENABLED")
+    return {"status": "ok", "testnet": TESTNET}
+
+def enable_sl():
+    global SL_OVERRIDE
+    SL_OVERRIDE = True
+    print("🟢 SL override ENABLED")
+    return {"status": "ok", "sl_override": SL_OVERRIDE}
+
+def disable_sl():
+    global SL_OVERRIDE
+    SL_OVERRIDE = False
+    print("🔴 SL override DISABLED")
+    return {"status": "ok", "sl_override": SL_OVERRIDE}
+
+def enable_tp():
+    global TP_OVERRIDE
+    TP_OVERRIDE = True
+    print("🟢 TP override ENABLED")
+    return {"status": "ok", "tp_override": TP_OVERRIDE}
+
+def disable_tp():
+    global TP_OVERRIDE
+    TP_OVERRIDE = False
+    print("🔴 TP override DISABLED")
+    return {"status": "ok", "tp_override": TP_OVERRIDE}
+
+def logout(ip):
+    destroy_admin_session(ip)
+    return {"status": "logged_out"}
+
 def get_btc_usdc_price():
     r = requests.get(f"{BASE_URL}/api/v3/ticker/price", params={"symbol": "BTCUSDC"}, timeout=5)
     return float(r.json()["price"])
@@ -661,9 +961,49 @@ def sanitize_payload(payload: dict) -> dict:
     return clean
 
 
+# ====== ADMIN SESSION SYSTEM ======
+ADMIN_SESSIONS = {}
+ADMIN_SESSION_TIMEOUT = 300
+
+def get_client_ip():
+    """
+    Returns client IP.
+    Compatible with reverse proxies (Render, Railway, etc.)
+    """
+    if request.headers.get("X-Forwarded-For"):
+        return request.headers.get("X-Forwarded-For").split(",")[0].strip()
+    return request.remote_addr
+
+def admin_session_active(ip):
+    now = time.time()
+
+    if ip not in ADMIN_SESSIONS:
+        return False
+
+    last_seen = ADMIN_SESSIONS[ip]
+
+    if now - last_seen > ADMIN_SESSION_TIMEOUT:
+        print(f"🔒 Admin session expired for {ip}")
+        del ADMIN_SESSIONS[ip]
+        return False
+
+    ADMIN_SESSIONS[ip] = now
+    return True
+
+def create_admin_session(ip):
+    ADMIN_SESSIONS[ip] = time.time()
+    print(f"🔓 Admin session opened for {ip}")
+
+def destroy_admin_session(ip):
+    if ip in ADMIN_SESSIONS:
+        del ADMIN_SESSIONS[ip]
+        print(f"🔒 Admin session closed for {ip}")
+
+
 # ====== FLASK WEBHOOK ======
 @app.route("/webhook", methods=["POST"])
 def webhook():
+
     try:
         data = request.get_json(force=True)
     except Exception:
@@ -674,16 +1014,26 @@ def webhook():
 
     print(f"📩 Webhook received: {sanitize_payload(data)}")
 
+    # 🔐 ADMIN LOGIN (without action)
+    if data.get("admin_key") == ADMIN_KEY and "action" not in data:
+        client_ip = get_client_ip()
+        create_admin_session(client_ip)
+        return jsonify({"status": "admin_session_started"}), 200
+
     # 🔐 ADMIN MODE
     if "action" in data:
+
         action = data["action"].upper()
+        client_ip = get_client_ip()
 
-        if ADMIN_KEY:
-            if data.get("admin_key") != os.getenv("ADMIN_KEY"):
-                print("🚫 Unauthorized admin action attempt")
-                return jsonify({"error": "unauthorized"}), 403
+        if data.get("admin_key") == ADMIN_KEY:
+            create_admin_session(client_ip)
 
-        print(f"🛠️ ADMIN ACTION RECEIVED: {action}")
+        if not admin_session_active(client_ip):
+            print(f"🚫 Unauthorized admin access from {client_ip}")
+            return jsonify({"error": "admin_auth_required"}), 403
+
+        print(f"🛠️ ADMIN ACTION RECEIVED: {action} from {client_ip}")
 
         if action == "CLEAR":
             result = clear()
@@ -705,11 +1055,53 @@ def webhook():
             repay(amount)
             return jsonify({"status": "ok", "action": action, "amount": amount}), 200
 
+        if action == "PAUSE":
+            result = pause_trading()
+            return jsonify({"action": action, **result}), 200
+
+        if action == "RESUME":
+            result = resume_trading()
+            return jsonify({"action": action, **result}), 200
+
+        if action == "TESTNET_ON":
+            result = testnet_on()
+            return jsonify({"action": action, **result}), 200
+
+        if action == "TESTNET_OFF":
+            result = testnet_off()
+            return jsonify({"action": action, **result}), 200
+
+        if action == "ENABLE_SL":
+            result = enable_sl()
+            return jsonify({"action": action, **result}), 200
+
+        if action == "DISABLE_SL":
+            result = disable_sl()
+            return jsonify({"action": action, **result}), 200
+
+        if action == "ENABLE_TP":
+            result = enable_tp()
+            return jsonify({"action": action, **result}), 200
+
+        if action == "DISABLE_TP":
+            result = disable_tp()
+            return jsonify({"action": action, **result}), 200
+
+        if action == "LOGOUT":
+            result = logout(client_ip)
+            return jsonify({"action": action, **result}), 200
+
         else:
             print("❓ Unknown action")
             return jsonify({"error": "Unknown action"}), 400
 
+
     # 📈 TRADING MODE (TradingView)
+
+    allowed, response = trading_guard()
+    if not allowed:
+        return response
+
     if "symbol" not in data or "side" not in data:
         print("❓ Missing trading fields")
         return jsonify({"error": "Missing trading fields"}), 400
@@ -749,6 +1141,12 @@ def webhook():
     return jsonify({"status": "ok", "result": resp}), 200
 
 
+@app.route("/health", methods=["GET"])
+def health():
+    uptime = int(time.time() - BOOT_TIME)
+    return jsonify({"bot_ready": BOT_READY, "trading_enabled": TRADING_ENABLED, "uptime_seconds": uptime, "mode": "TESTNET" if TESTNET else "LIVE"})
+
+
 # ====== FLASK EXECUTION ======
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")))
+    app.run(host="0.0.0.0", port=PORT)
