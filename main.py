@@ -753,18 +753,6 @@ def check_milestones(total_balance_usdc: float):
 
 
 # ====== ADMIN FUNCTIONS ======
-ADMIN_ACTIONS = {
-    "CLEAR": clear,
-    "READ": read,
-    "BORROW": borrow,
-    "REPAY": repay,
-    "TRADING": set_trading_state,
-    "TESTNET": set_testnet_state,
-    "SL": set_sl_override,
-    "TP": set_tp_override,
-    "LOGOUT": logout
-}
-
 def clear():
     print("🔁 Converting ALL assets to USDC...")
     account = get_margin_account()
@@ -966,6 +954,18 @@ def get_margin_account():
     acc = send_signed_request("GET", "/sapi/v1/margin/account", params)
     return acc
 
+ADMIN_ACTIONS = {
+    "CLEAR": clear,
+    "READ": read,
+    "BORROW": borrow,
+    "REPAY": repay,
+    "TRADING": set_trading_state,
+    "TESTNET": set_testnet_state,
+    "SL": set_sl_override,
+    "TP": set_tp_override,
+    "LOGOUT": logout
+}
+
 
 # ====== CENSORING KEYS ======
 SENSITIVE_FIELDS = {"admin_key", "trading_key"}
@@ -1136,3 +1136,4 @@ def health():
 # ====== FLASK EXECUTION ======
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
+
