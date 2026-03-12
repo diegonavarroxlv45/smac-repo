@@ -46,7 +46,7 @@ DEPLOY_GRACE_PERIOD = max(0, min(DEPLOY_GRACE_PERIOD, 240))
 # --- BOOL VARIABLES ---
 TESTNET = os.getenv("TESTNET", "false").lower() == "true"
 TRADING_ENABLED = os.getenv("TRADING_ENABLED", "true").lower() == "true"
-SL_OVERRIDE = os.getenv("SL_OVERRIDE", "true").lover() == "true"
+SL_OVERRIDE = os.getenv("SL_OVERRIDE", "true").lower() == "true"
 TP_OVERRIDE = os.getenv("TP_OVERRIDE", "true").lower() == "true"
 
 # --- SECRET VARIABLES ---
@@ -116,10 +116,6 @@ def _check_binance_connectivity():
 
 # --- PUBLIC BINANCE REQUEST ---
 def send_public_request(http_method: str, path: str, params=None):
-    """
-    Sends unsigned request to Binance public endpoints.
-    Works for REAL and TESTNET automatically via BASE_URL.
-    """
     url = f"{BASE_URL}{path}"
 
     try:
@@ -186,9 +182,6 @@ def is_bot_ready():
 
 # --- SAFE EXECUTION GUARD ---
 def trading_guard():
-    """
-    Call this BEFORE executing ANY trade.
-    """
     if not is_bot_ready():
         return False, (
             jsonify({
@@ -602,25 +595,17 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
             return True
 
         # === Price calculation ===
-
-        # ---- SL ----
         if sl_override is not None:
             sl_price = float(sl_override)
-
         elif SL_OVERRIDE and SL_PCT is not None:
             sl_price = entry_price * (1 - SL_PCT / 100) if side == "BUY" else entry_price * (1 + SL_PCT / 100)
-
         else:
             sl_price = None
 
-
-        # ---- TP ----
         if tp_override is not None:
             tp_price = float(tp_override)
-
         elif TP_OVERRIDE and TP_PCT is not None:
             tp_price = entry_price * (1 + TP_PCT / 100) if side == "BUY" else entry_price * (1 - TP_PCT / 100)
-
         else:
             tp_price = None
 
@@ -768,6 +753,18 @@ def check_milestones(total_balance_usdc: float):
 
 
 # ====== ADMIN FUNCTIONS ======
+ADMIN_ACTIONS = {
+    "CLEAR": clear,
+    "READ": read,
+    "BORROW": borrow,
+    "REPAY": repay,
+    "TRADING": set_trading_state,
+    "TESTNET": set_testnet_state,
+    "SL": set_sl_override,
+    "TP": set_tp_override,
+    "LOGOUT": logout
+}
+
 def clear():
     print("🔁 Converting ALL assets to USDC...")
     account = get_margin_account()
@@ -819,6 +816,8 @@ def read():
     print("────────── 📊 ACCOUNT SNAPSHOT 📊 ──────────")
     print(f"├─ 🤖 Trading Enabled      : {TRADING_ENABLED}")
     print(f"├─ 🧪 Testnet Mode         : {TESTNET}")
+    print(f"├─ 🔴 Stop Loss Override   : {SL_OVERRIDE}")
+    print(f"├─ 🟢 Take Profit Override : {TP_OVERRIDE}")
     print(f"├─ 💰 Total Balance (USDC) : {total_balance_usdc:.8f}")
     print(f"├─ 💸 USDC Balance         : {usdc_balance:.8f}")
     print(f"├─ 💳 USDC Borrowed        : {usdc_borrowed:.8f}")
@@ -828,6 +827,8 @@ def read():
 
     snapshot = {"TRADING_ENABLED": TRADING_ENABLED,
                 "TESTNET": TESTNET,
+                "SL_OVERRIDE": SL_OVERRIDE,
+                "TP_OVERRIDE": TP_OVERRIDE,
                 "totalBalanceUSDC": round(total_balance_usdc, 8),
                 "usdcBalance": round(usdc_balance, 8),
                 "usdcBorrowed": round(usdc_borrowed, 8),
@@ -887,52 +888,68 @@ def repay(amount):
     print(f"✅ REPAY completed: {amount} USDC")
     return resp
 
-def pause_trading():
+def set_trading_state(state):
     global TRADING_ENABLED
-    TRADING_ENABLED = False
-    print("⏸️ ADMIN ACTION: Trading PAUSED")
+
+    if state == "on":
+        TRADING_ENABLED = True
+        print("▶️ ADMIN ACTION: Trading RESUMED")
+
+    elif state == "off":
+        TRADING_ENABLED = False
+        print("⏸️ ADMIN ACTION: Trading PAUSED")
+
+    else:
+        return {"status": "error", "msg": "invalid state"}
+
     return {"status": "ok", "trading_enabled": TRADING_ENABLED}
 
-def resume_trading():
-    global TRADING_ENABLED
-    TRADING_ENABLED = True
-    print("▶️ ADMIN ACTION: Trading RESUMED")
-    return {"status": "ok", "trading_enabled": TRADING_ENABLED}
-
-def testnet_on():
+def set_testnet_state(state):
     global TESTNET
-    TESTNET = True
-    print("🧪 ADMIN ACTION: TESTNET MODE ENABLED")
+
+    if state == "on":
+        TESTNET = True
+        print("🧪 ADMIN ACTION: TESTNET MODE ENABLED")
+
+    elif state == "off":
+        TESTNET = False
+        print("🌐 ADMIN ACTION: LIVE MODE ENABLED")
+
+    else:
+        return {"status": "error", "msg": "invalid state"}
+
     return {"status": "ok", "testnet": TESTNET}
 
-def testnet_off():
-    global TESTNET
-    TESTNET = False
-    print("🌐 ADMIN ACTION: LIVE MODE ENABLED")
-    return {"status": "ok", "testnet": TESTNET}
-
-def enable_sl():
+def set_sl_override(state):
     global SL_OVERRIDE
-    SL_OVERRIDE = True
-    print("🟢 SL override ENABLED")
+
+    if state == "on":
+        SL_OVERRIDE = True
+        print("🟢 SL override ENABLED")
+
+    elif state == "off":
+        SL_OVERRIDE = False
+        print("🔴 SL override DISABLED")
+
+    else:
+        return {"status": "error", "msg": "invalid state"}
+
     return {"status": "ok", "sl_override": SL_OVERRIDE}
 
-def disable_sl():
-    global SL_OVERRIDE
-    SL_OVERRIDE = False
-    print("🔴 SL override DISABLED")
-    return {"status": "ok", "sl_override": SL_OVERRIDE}
-
-def enable_tp():
+def set_tp_override(state):
     global TP_OVERRIDE
-    TP_OVERRIDE = True
-    print("🟢 TP override ENABLED")
-    return {"status": "ok", "tp_override": TP_OVERRIDE}
 
-def disable_tp():
-    global TP_OVERRIDE
-    TP_OVERRIDE = False
-    print("🔴 TP override DISABLED")
+    if state == "on":
+        TP_OVERRIDE = True
+        print("🟢 TP override ENABLED")
+
+    elif state == "off":
+        TP_OVERRIDE = False
+        print("🔴 TP override DISABLED")
+
+    else:
+        return {"status": "error", "msg": "invalid state"}
+
     return {"status": "ok", "tp_override": TP_OVERRIDE}
 
 def logout(ip):
@@ -966,10 +983,6 @@ ADMIN_SESSIONS = {}
 ADMIN_SESSION_TIMEOUT = 300
 
 def get_client_ip():
-    """
-    Returns client IP.
-    Compatible with reverse proxies (Render, Railway, etc.)
-    """
     if request.headers.get("X-Forwarded-For"):
         return request.headers.get("X-Forwarded-For").split(",")[0].strip()
     return request.remote_addr
@@ -1024,6 +1037,7 @@ def webhook():
     if "action" in data:
 
         action = data["action"].upper()
+        state = data.get("state", "").lower()
         client_ip = get_client_ip()
 
         if data.get("admin_key") == ADMIN_KEY:
@@ -1035,69 +1049,41 @@ def webhook():
 
         print(f"🛠️ ADMIN ACTION RECEIVED: {action} from {client_ip}")
 
-        if action == "CLEAR":
-            result = clear()
-            return jsonify({"status": "ok", "action": action, "result": result}), 200
+        handler = ADMIN_ACTIONS.get(action)
 
-        if action == "READ":
-            snapshot = read()
-            return jsonify(snapshot), 200
-
-        if action == "BORROW":
-            amount = float(data.get("amount", 0))
-            borrow(amount)
-            return jsonify({"status": "ok", "action": action, "amount": amount}), 200
-
-        if action == "REPAY":
-            amount = data.get("amount", 0)
-            if isinstance(amount, str):
-                amount = amount.lower()
-            repay(amount)
-            return jsonify({"status": "ok", "action": action, "amount": amount}), 200
-
-        if action == "PAUSE":
-            result = pause_trading()
-            return jsonify({"action": action, **result}), 200
-
-        if action == "RESUME":
-            result = resume_trading()
-            return jsonify({"action": action, **result}), 200
-
-        if action == "TESTNET_ON":
-            result = testnet_on()
-            return jsonify({"action": action, **result}), 200
-
-        if action == "TESTNET_OFF":
-            result = testnet_off()
-            return jsonify({"action": action, **result}), 200
-
-        if action == "ENABLE_SL":
-            result = enable_sl()
-            return jsonify({"action": action, **result}), 200
-
-        if action == "DISABLE_SL":
-            result = disable_sl()
-            return jsonify({"action": action, **result}), 200
-
-        if action == "ENABLE_TP":
-            result = enable_tp()
-            return jsonify({"action": action, **result}), 200
-
-        if action == "DISABLE_TP":
-            result = disable_tp()
-            return jsonify({"action": action, **result}), 200
-
-        if action == "LOGOUT":
-            result = logout(client_ip)
-            return jsonify({"action": action, **result}), 200
-
-        else:
+        if not handler:
             print("❓ Unknown action")
             return jsonify({"error": "Unknown action"}), 400
 
+        if action == "CLEAR":
+            result = handler()
+            return jsonify({"status": "ok", "action": action, "result": result}), 200
+
+        elif action == "READ":
+            snapshot = handler()
+            return jsonify(snapshot), 200
+
+        elif action == "BORROW":
+            amount = float(data.get("amount", 0))
+            handler(amount)
+            return jsonify({"status": "ok", "action": action, "amount": amount}), 200
+
+        elif action == "REPAY":
+            amount = data.get("amount", 0)
+            if isinstance(amount, str):
+                amount = amount.lower()
+            handler(amount)
+            return jsonify({"status": "ok", "action": action, "amount": amount}), 200
+
+        elif action in ["TRADING", "TESTNET", "SL", "TP"]:
+            result = handler(state)
+            return jsonify({"action": action, "state": state, **result}), 200
+
+        elif action == "LOGOUT":
+            result = handler(client_ip)
+            return jsonify({"action": action, **result}), 200
 
     # 📈 TRADING MODE (TradingView)
-
     allowed, response = trading_guard()
     if not allowed:
         return response
