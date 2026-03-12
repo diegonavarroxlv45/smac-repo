@@ -22,26 +22,23 @@ app = Flask(__name__)
 
 
 # ====== VARIABLES ======
+# --- DEFAULT VARIABLES ---
+DEFAULT_RETRIES = 3
+DEFAULT_SL_PCT = 2.0
+DEFAULT_TP_PCT = 4.0
+
 # --- ENVIRONMENT VARIABLES ---
 RETRIES = int(os.getenv("RETRIES", "3"))
-DEFAULT_RISK_PCT = float(os.getenv("DEFAULT_RISK_PCT", "5"))
-MAX_RISK_PCT = float(os.getenv("MAX_RISK_PCT", "20"))
 SL_PCT = float(os.getenv("SL_PCT", "2"))
 TP_PCT = float(os.getenv("TP_PCT", "4"))
+MAX_RISK_PCT = float(os.getenv("MAX_RISK_PCT", "20"))
+MAX_RISK_PCT = max(0.1, min(MAX_RISK_PCT, 20))
+DEFAULT_RISK_PCT = float(os.getenv("DEFAULT_RISK_PCT", "5"))
+DEFAULT_RISK_PCT = max(0.1, min(DEFAULT_RISK_PCT, MAX_RISK_PCT))
 COMMISSION = Decimal(os.getenv("COMMISSION", "0.1"))
 MIN_BOOT_SECS = int(os.getenv("MIN_BOOT_SECS", "60"))
 DEPLOY_GRACE_PERIOD = int(os.getenv("DEPLOY_GRACE_PERIOD", "120"))
 PORT = int(os.getenv("PORT", "5000"))
-
-# --- VARIABLE LIMITS ---
-RETRIES = max(0, min(RETRIES, 5))
-MAX_RISK_PCT = max(0, min(MAX_RISK_PCT, 20))
-DEFAULT_RISK_PCT = max(0, min(DEFAULT_RISK_PCT, MAX_RISK_PCT))
-SL_PCT = max(0, min(SL_PCT, 50))
-TP_PCT = max(0, min(TP_PCT, 50))
-COMMISSION = max(0, min(COMMISSION, 100))
-MIN_BOOT_SECS = max(0, min(MIN_BOOT_SECS, 180))
-DEPLOY_GRACE_PERIOD = max(0, min(DEPLOY_GRACE_PERIOD, 240))
 
 # --- BOOL VARIABLES ---
 TESTNET = os.getenv("TESTNET", "false").lower() == "true"
@@ -753,10 +750,13 @@ def check_milestones(total_balance_usdc: float):
 
 
 # ====== ADMIN FUNCTIONS ======
-def clear():
-    print("🔁 Converting ALL assets to USDC...")
-    account = get_margin_account()
+def clear(symbol=None):
+    if symbol:
+        print(f"🔁 Converting {symbol} to USDC...")
+    else:
+        print("🔁 Converting ALL assets to USDC...")
 
+    account = get_margin_account()
     cleared_symbols = []
     failed_symbols = []
 
@@ -767,15 +767,19 @@ def clear():
         if asset_name == "USDC" or free_qty <= 0:
             continue
 
-        symbol = f"{asset_name}USDC"
+        asset_symbol = f"{asset_name}USDC"
+
+        if symbol and asset_symbol != symbol:
+            continue
 
         try:
             print(f"↪ Clearing {free_qty} {asset_name}")
-            handle_pre_trade_cleanup(symbol)
-            cleared_symbols.append(symbol)
+            handle_pre_trade_cleanup(asset_symbol)
+            cleared_symbols.append(asset_symbol)
+
         except Exception as e:
-            print(f"⚠️ Could not convert {symbol}: {e}")
-            failed_symbols.append({"symbol": symbol, "error": str(e)})
+            print(f"⚠️ Could not convert {asset_symbol}: {e}")
+            failed_symbols.append({"symbol": asset_symbol, "error": str(e)})
 
     print("✅ CLEAR completed")
     return {"cleared": cleared_symbols, "failed": failed_symbols}
@@ -789,43 +793,72 @@ def read():
     usdc_balance = 0.0
     usdc_borrowed = 0.0
 
+    assets_with_balance = []
+
     for asset in acc["userAssets"]:
+
         borrowed = float(asset["borrowed"])
+        free = float(asset["free"])
+        locked = float(asset["locked"])
+
         total_debt += borrowed
 
+        total_asset_balance = free + locked
+
+        if total_asset_balance > 0 and asset["asset"] != "USDC":
+            assets_with_balance.append({
+                "asset": asset["asset"],
+                "balance": round(total_asset_balance, 8)
+            })
+
         if asset["asset"] == "USDC":
-            usdc_balance = float(asset["free"]) + float(asset["locked"])
+            usdc_balance = total_asset_balance
             usdc_borrowed = borrowed
+
 
     btc_usdc_price = get_btc_usdc_price()
     total_balance_usdc = float(acc["totalNetAssetOfBtc"]) * btc_usdc_price
     margin_level = float(acc["marginLevel"])
 
-    print("────────── 📊 ACCOUNT SNAPSHOT 📊 ──────────")
+    print("────────── 📊 ACCOUNT VARIABLES 📊 ──────────")
     print(f"├─ 🤖 Trading Enabled      : {TRADING_ENABLED}")
     print(f"├─ 🧪 Testnet Mode         : {TESTNET}")
-    print(f"├─ 🔴 Stop Loss Override   : {SL_OVERRIDE}")
-    print(f"├─ 🟢 Take Profit Override : {TP_OVERRIDE}")
+    print(f"├─ 🟥 Stop Loss Override   : {SL_OVERRIDE}")
+    print(f"├─ 🟩 Take Profit Override : {TP_OVERRIDE}")
+    print(f"├─ 🔴 Stop Loss Value      : {SL_PCT}")
+    print(f"├─ 🟢 Take Profit Value    : {TP_PCT}")
+    print(f"├─ 🔄 Retries Value        : {RETRIES}")
+    print("────────── 📊 ACCOUNT SNAPSHOT 📊 ──────────")
     print(f"├─ 💰 Total Balance (USDC) : {total_balance_usdc:.8f}")
     print(f"├─ 💸 USDC Balance         : {usdc_balance:.8f}")
     print(f"├─ 💳 USDC Borrowed        : {usdc_borrowed:.8f}")
     print(f"├─ 📉 Total Debt           : {total_debt:.8f}")
     print(f"├─ ⚖️ Margin Level         : {margin_level}")
+    print(f"├─ 🧾 Assets with balance:")
+    for a in assets_with_balance:
+        print(f"│   ├─ {a['asset']} : {a['balance']}")
+
     print("──────────────────────────────────────────────")
 
-    snapshot = {"TRADING_ENABLED": TRADING_ENABLED,
-                "TESTNET": TESTNET,
-                "SL_OVERRIDE": SL_OVERRIDE,
-                "TP_OVERRIDE": TP_OVERRIDE,
-                "totalBalanceUSDC": round(total_balance_usdc, 8),
-                "usdcBalance": round(usdc_balance, 8),
-                "usdcBorrowed": round(usdc_borrowed, 8),
-                "totalDebt": round(total_debt, 8),
-                "marginLevel": float(acc["marginLevel"])
+    snapshot = {
+        "TRADING_ENABLED": TRADING_ENABLED,
+        "TESTNET": TESTNET,
+        "SL_OVERRIDE": SL_OVERRIDE,
+        "TP_OVERRIDE": TP_OVERRIDE,
+        "SL": SL_PCT,
+        "TP": TP_PCT,
+        "RETRIES": RETRIES,
+        "totalBalanceUSDC": round(total_balance_usdc, 8),
+        "usdcBalance": round(usdc_balance, 8),
+        "usdcBorrowed": round(usdc_borrowed, 8),
+        "totalDebt": round(total_debt, 8),
+        "marginLevel": float(acc["marginLevel"]),
+        "assetsWithBalance": assets_with_balance
     }
-    check_milestones(total_balance_usdc)
-    return snapshot
 
+    check_milestones(total_balance_usdc)
+
+    return snapshot
 def borrow(amount: float):
     print(f"📥 ADMIN BORROW requested: {amount} USDC")
 
@@ -908,37 +941,94 @@ def set_testnet_state(state):
 
     return {"status": "ok", "testnet": TESTNET}
 
-def set_sl_override(state):
-    global SL_OVERRIDE
+def set_sl(state=None, value=None):
+    global SL_OVERRIDE, SL_PCT
 
-    if state == "on":
-        SL_OVERRIDE = True
-        print("🟢 SL override ENABLED")
+    if state is not None:
 
-    elif state == "off":
-        SL_OVERRIDE = False
-        print("🔴 SL override DISABLED")
+        if state == "on":
+            SL_OVERRIDE = True
+            print("🟢 SL override ENABLED")
 
-    else:
-        return {"status": "error", "msg": "invalid state"}
+        elif state == "off":
+            SL_OVERRIDE = False
+            print("🔴 SL override DISABLED")
 
-    return {"status": "ok", "sl_override": SL_OVERRIDE}
+        else:
+            return {"status": "error", "msg": "invalid state"}
 
-def set_tp_override(state):
-    global TP_OVERRIDE
+        return {"status": "ok", "sl_override": SL_OVERRIDE}
 
-    if state == "on":
-        TP_OVERRIDE = True
-        print("🟢 TP override ENABLED")
+    if value is not None:
 
-    elif state == "off":
-        TP_OVERRIDE = False
-        print("🔴 TP override DISABLED")
+        try:
+            value = float(value)
+        except:
+            return {"status": "error", "msg": "invalid SL value"}
 
-    else:
-        return {"status": "error", "msg": "invalid state"}
+        SL_PCT = max(0.1, min(value, 50))
+        print(f"🛠️ ADMIN ACTION: SL value updated → {SL_PCT}")
+        return {"status": "ok", "sl_value": SL_PCT}
 
-    return {"status": "ok", "tp_override": TP_OVERRIDE}
+    return {"status": "error", "msg": "no state or value provided"}
+
+def set_tp(state=None, value=None):
+    global TP_OVERRIDE, TP_PCT
+
+    if state is not None:
+
+        if state == "on":
+            TP_OVERRIDE = True
+            print("🟢 TP override ENABLED")
+
+        elif state == "off":
+            TP_OVERRIDE = False
+            print("🔴 TP override DISABLED")
+
+        else:
+            return {"status": "error", "msg": "invalid state"}
+
+        return {"status": "ok", "tp_override": TP_OVERRIDE}
+
+    if value is not None:
+
+        try:
+            value = float(value)
+        except:
+            return {"status": "error", "msg": "invalid TP value"}
+
+        TP_PCT = max(0.1, min(value, 50))
+        print(f"🛠️ ADMIN ACTION: TP value updated → {TP_PCT}")
+        return {"status": "ok", "tp_value": TP_PCT}
+
+    return {"status": "error", "msg": "no state or value provided"}
+
+def set_retries(value=None):
+    global RETRIES
+
+    if value is not None:
+
+        try:
+            value = int(value)
+        except:
+            return {"status": "error", "msg": "invalid RETRIES value"}
+
+        RETRIES = max(1, min(value, 5))
+        print(f"🛠️ ADMIN ACTION: RETRIES value updated → {RETRIES}")
+        return {"status": "ok", "retries_value": RETRIES}
+
+    return {"status": "error", "msg": "no state or value provided"}
+
+def restore():
+    global RETRIES, SL_PCT, TP_PCT
+    print("🛠️ ADMIN ACTION: RESTORE default trading parameters")
+    RETRIES = DEFAULT_RETRIES
+    SL_PCT = DEFAULT_SL_PCT
+    TP_PCT = DEFAULT_TP_PCT
+    print(f"🔄 RETRIES restored → {RETRIES}")
+    print(f"🔄 SL_PCT restored → {SL_PCT}")
+    print(f"🔄 TP_PCT restored → {TP_PCT}")
+    return {"status": "ok", "RETRIES": RETRIES, "SL_PCT": SL_PCT, "TP_PCT": TP_PCT}
 
 def logout(ip):
     destroy_admin_session(ip)
@@ -961,8 +1051,10 @@ ADMIN_ACTIONS = {
     "REPAY": repay,
     "TRADING": set_trading_state,
     "TESTNET": set_testnet_state,
-    "SL": set_sl_override,
-    "TP": set_tp_override,
+    "SL": set_sl,
+    "TP": set_tp,
+    "RETRIES": set_retries,
+    "RESTORE": restore,
     "LOGOUT": logout
 }
 
@@ -1056,7 +1148,8 @@ def webhook():
             return jsonify({"error": "Unknown action"}), 400
 
         if action == "CLEAR":
-            result = handler()
+            symbol = data.get("symbol")
+            result = handler(symbol)
             return jsonify({"status": "ok", "action": action, "result": result}), 200
 
         elif action == "READ":
@@ -1075,9 +1168,23 @@ def webhook():
             handler(amount)
             return jsonify({"status": "ok", "action": action, "amount": amount}), 200
 
-        elif action in ["TRADING", "TESTNET", "SL", "TP"]:
+        elif action in ["TRADING", "TESTNET"]:
             result = handler(state)
             return jsonify({"action": action, "state": state, **result}), 200
+
+        elif action in ["SL", "TP"]:
+            value = data.get("value")
+            result = handler(state=state if state else None, value=value)
+            return jsonify({"action": action, "state": state, "value": value, **result}), 200
+
+        elif action == "RETRIES":
+            value = data.get("value")
+            result = handler(value)
+            return jsonify({"action": action, "value": value, **result}), 200
+
+        if action == "RESTORE":
+            result = handler()
+            return jsonify({"status": "ok", **result}), 200
 
         elif action == "LOGOUT":
             result = handler(client_ip)
