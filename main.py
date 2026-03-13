@@ -11,14 +11,48 @@ import time
 import math
 import hmac
 import hashlib
+import logging
 import requests
 import functools
+from datetime import datetime
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
+from logging.handlers import TimedRotatingFileHandler
 
 # ====== SETTINGS ======
 print = functools.partial(print, flush=True)
 app = Flask(__name__)
+
+
+# ====== LOGGING ======
+logger = logging.getLogger("bot")
+logger.setLevel(logging.INFO)
+
+handler = TimedRotatingFileHandler(
+    "bot.log",
+    when="midnight",
+    interval=30,
+    backupCount=12
+)
+
+formatter = logging.Formatter(
+    "%(asctime)s | %(levelname)s | %(filename)s:%(lineno)d | %(message)s",
+)
+
+handler.setFormatter(formatter)
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(formatter)
+logger.addHandler(handler)
+logger.addHandler(console_handler)
+
+ADMIN_LEVEL = 25
+logging.addLevelName(ADMIN_LEVEL, "ADMIN")
+
+def admin(self, message, *args, **kwargs):
+    if self.isEnabledFor(ADMIN_LEVEL):
+        self._log(ADMIN_LEVEL, message, args, **kwargs)
+
+logging.Logger.admin = admin
 
 
 # ====== VARIABLES ======
@@ -57,36 +91,37 @@ ADMIN_KEY = os.getenv("ADMIN_KEY")
 
 # ====== APIS ======
 BASE_URL = "https://api.binance.com"
+EXCANGE_INFO = None
 
 if not BINANCE_API_KEY and not BINANCE_API_SECRET:
-    print("❌ BINANCE_API_KEY and BINANCE_API_SECRET are NOT defined")
+    logger.error("❌ BINANCE_API_KEY and BINANCE_API_SECRET are NOT defined")
     raise RuntimeError("Missing Binance API credentials")
 
 if not BINANCE_API_KEY:
-    print("❌ BINANCE_API_KEY is NOT defined")
+    logger.error("❌ BINANCE_API_KEY is NOT defined")
     raise RuntimeError("Missing BINANCE_API_KEY")
 
 if not BINANCE_API_SECRET:
-    print("❌ BINANCE_API_SECRET is NOT defined")
+    logger.error("❌ BINANCE_API_SECRET is NOT defined")
     raise RuntimeError("Missing BINANCE_API_SECRET")
 
 else:
-    print("🔐 Binance API credentials loaded successfully")
+    logger.info("🔐 Binance API credentials loaded successfully")
 
 if not TESTNET_API_KEY and not TESTNET_API_SECRET:
-    print("❌ TESTNET_API_KEY and TESTNET_API_SECRET are NOT defined")
+    logger.error("❌ TESTNET_API_KEY and TESTNET_API_SECRET are NOT defined")
     raise RuntimeError("Missing Testnet API credentials")
 
 if not TESTNET_API_KEY:
-    print("❌ BINANCE_API_KEY is NOT defined")
+    logger.error("❌ BINANCE_API_KEY is NOT defined")
     raise RuntimeError("Missing TESTNET_API_KEY")
 
 if not TESTNET_API_SECRET:
-    print("❌ TESTNET_API_SECRET is NOT defined")
+    logger.error("❌ TESTNET_API_SECRET is NOT defined")
     raise RuntimeError("Missing TESTNET_API_SECRET")
 
 else:
-    print("🔐 Testnet API credentials loaded successfully")
+    logger.info("🔐 Testnet API credentials loaded successfully")
 
 if TESTNET:
     BINANCE_API_KEY = os.getenv("TESTNET_API_KEY")
@@ -108,7 +143,7 @@ def _check_binance_connectivity():
         send_public_request("GET", "/api/v3/time")
         return True
     except Exception as e:
-        print(f"❌ Binance connectivity failed: {e}")
+        logger.error(f"❌ Binance connectivity failed: {e}")
         return False
 
 # --- PUBLIC BINANCE REQUEST ---
@@ -122,7 +157,7 @@ def send_public_request(http_method: str, path: str, params=None):
             params=params
         )
     except Exception as e:
-        print(f"⚠️ Public request failed {path}: {e}")
+        logger.error(f"⚠️ Public request failed {path}: {e}")
         raise
 
 # --- ACCOUNT ACCESS CHECK ---
@@ -131,12 +166,12 @@ def _check_account_access():
         get_balance_margin("USDC")
         return True
     except Exception as e:
-        print(f"❌ Account access failed: {e}")
+        logger.error(f"❌ Account access failed: {e}")
         return False
 
 # --- GLOBAL HEALTH CHECK ---
 def health_check():
-    print("🩺 Running health check...")
+    logger.info("🩺 Running health check...")
 
     if not _check_binance_connectivity():
         return False
@@ -144,7 +179,7 @@ def health_check():
     if not _check_account_access():
         return False
 
-    print("✅ Health check passed")
+    logger.info("✅ Health check passed")
     return True
 
 # --- BOT READINESS STATE MACHINE ---
@@ -152,7 +187,7 @@ def is_bot_ready():
     global BOT_READY
 
     if not TRADING_ENABLED:
-        print("🛑 Trading manually disabled (TRADING_ENABLED=false)")
+        logger.info("🛑 Trading manually disabled (TRADING_ENABLED=false)")
         return False
 
     if BOT_READY:
@@ -161,19 +196,19 @@ def is_bot_ready():
     uptime = time.time() - BOOT_TIME
 
     if uptime < MIN_BOOT_SECS:
-        print(f"⏳ Boot protection active ({int(uptime)}s/{MIN_BOOT_SECS}s)")
+        logger.info(f"⏳ Boot protection active ({int(uptime)}s/{MIN_BOOT_SECS}s)")
         return False
 
     if uptime < DEPLOY_GRACE_PERIOD:
-        print(f"🟡 Deploy grace period ({int(uptime)}s/{DEPLOY_GRACE_PERIOD}s)")
+        logger.info(f"🟡 Deploy grace period ({int(uptime)}s/{DEPLOY_GRACE_PERIOD}s)")
         return False
 
     if not health_check():
-        print("⚠️ Bot not healthy yet")
+        logger.error("⚠️ Bot not healthy yet")
         return False
 
     BOT_READY = True
-    print("🚀 BOT READY — trading ENABLED")
+    logger.info("🚀 BOT READY — trading ENABLED")
 
     return True
 
@@ -217,9 +252,9 @@ def _request_with_retries(method: str, url: str, **kwargs):
                 except Exception:
                     return resp.text
             else:
-                print(f"⚠️ Attempt {i+1} failed: {resp.text}")
+                logger.error(f"⚠️ Attempt {i+1} failed: {resp.text}")
         except Exception as e:
-            print(f"⚠️ Request error: {e}")
+            logger.error(f"⚠️ Request error: {e}")
         time.sleep(1)
     raise Exception("❌ Request failed after retries")
 
@@ -242,7 +277,7 @@ def resolve_risk_pct(webhook_data=None):
         try:
             risk_pct = float(webhook_data["risk_pct"])
         except Exception:
-            print("⚠️ Invalid risk_pct from webhook")
+            logger.error("⚠️ Invalid risk_pct from webhook")
 
     risk_pct = min(risk_pct, MARGIN_MAX_RISK_PCT)
 
@@ -260,8 +295,14 @@ def get_balance_margin(asset="USDC") -> float:
     bal = next((b for b in data.get("userAssets", []) if b["asset"] == asset), None)
     return float(bal["free"]) if bal else 0.0
 
+def load_exchange_info():
+    global EXCHANGE_INFO
+    logger.info("📡 Loading exchange info...")
+    EXCHANGE_INFO = send_public_request("GET", "/api/v3/exchangeInfo")
+    logger.info("✅ Exchange info loaded")
+
 def get_symbol_lot(symbol):
-    data = _request_with_retries("GET", f"{BASE_URL}/api/v3/exchangeInfo")
+    data = EXCHANGE_INFO
     for s in data["symbols"]:
         if s["symbol"] == symbol:
             fs = next((f for f in s["filters"] if f["filterType"] == "LOT_SIZE"), None)
@@ -273,6 +314,13 @@ def get_symbol_lot(symbol):
             return {"stepSize_str": fs["stepSize"], "stepSize": float(fs["stepSize"]), "minQty": float(fs.get("minQty", 0.0)), "tickSize_str": ts["tickSize"], "tickSize": float(ts["tickSize"]), "minNotional": minNotional,}
     raise Exception(f"Symbol not found: {symbol}")
 
+
+# ===== LOAD EXCHANGE INFO =====
+try:
+    load_exchange_info()
+except Exception as e:
+    logger.error(f"❌ Error loading exchange info: {e}")
+    raise
 
 # ====== PRICE ADJUST (tickSize) ======
 def format_price_to_tick(price: float, tick_size_str: str, rounding=ROUND_DOWN) -> str:
@@ -300,54 +348,54 @@ def check_margin_level():
     try:
         account_info = get_margin_account()
         margin_level = float(account_info["marginLevel"])
-        print(f"🧮 Current Margin Level: {margin_level:.2f}")
+        logger.info(f"🧮 Current Margin Level: {margin_level:.2f}")
 
         # 🚨 CRITICAL — CONTROLLED LIQUIDATION
         if margin_level < 1.16:
-            print("🚨 CRITICAL! Margin < 1.16 — EXECUTING CONTROLLED LIQUIDATION")
+            logger.warning("🚨 CRITICAL! Margin < 1.16 — EXECUTING CONTROLLED LIQUIDATION")
             TRADING_BLOCKED = True
             clear()
             return False
 
         # 🔴 EMERGENCY — BLOCK NEW ENTRIES
         elif margin_level < 1.25:
-            print("🔴 DANGER! Margin < 1.25 — BLOCKING NEW ENTRIES")
+            logger.warning("🔴 DANGER! Margin < 1.25 — BLOCKING NEW ENTRIES")
             TRADING_BLOCKED = True
             return True
 
         # 🟠 DEFENSIVE — LIMIT MAX RISK
         elif margin_level < 2:
-            print("🟠 WARNING! Margin < 2 — LIMITING MAX RISK TO 2%")
+            logger.warning("🟠 WARNING! Margin < 2 — LIMITING MAX RISK TO 2%")
             MARGIN_MAX_RISK_PCT = 2
             return True
 
         # 🟢 HEALTHY
         else:
             if TRADING_BLOCKED:
-                print("✅ Margin recovered — resuming normal operation")
+                logger.info("✅ Margin recovered — resuming normal operation")
 
             TRADING_BLOCKED = False
             MARGIN_MAX_RISK_PCT = MAX_RISK_PCT
-            print("✅ Margin level healthy")
+            logger.info("✅ Margin level healthy")
             return True
 
     except Exception as e:
-        print(f"⚠️ Could not fetch margin level: {e}")
+        logger.error(f"⚠️ Could not fetch margin level: {e}")
         return True
 
 
 # ====== PRE-TRADE CLEANUP ======
 def handle_pre_trade_cleanup(symbol: str):
     base_asset = symbol.replace("USDC", "")
-    print(f"🔄 Cleaning previous environment for {symbol}...")
+    logger.info(f"🔄 Cleaning previous environment for {symbol}...")
 
     # === 1️⃣ Cancel pending orders ===
     try:
         params = {"symbol": symbol, "timestamp": _now_ms()}
         send_signed_request("DELETE", "/sapi/v1/margin/openOrders", params)
-        print(f"🧹 Pending orders for {symbol} canceled")
+        logger.info(f"🧹 Pending orders for {symbol} canceled")
     except Exception as e:
-        print(f"⚠️ Couldn't cancel orders for {symbol}: {e}")
+        logger.error(f"⚠️ Couldn't cancel orders for {symbol}: {e}")
 
     # === 2️⃣ Repay debt ===
     try:
@@ -361,7 +409,7 @@ def handle_pre_trade_cleanup(symbol: str):
         usdc_data  = next((a for a in acc_data["userAssets"] if a["asset"] == "USDC"), None)
 
         if not asset_data:
-            print(f"ℹ️ {base_asset} not present in margin account")
+            logger.error(f"ℹ️ {base_asset} not present in margin account")
             return
 
         borrowed   = float(asset_data["borrowed"])
@@ -369,9 +417,9 @@ def handle_pre_trade_cleanup(symbol: str):
         free_usdc = float(usdc_data["free"]) if usdc_data else 0.0
 
         if borrowed <= 0:
-            print(f"✅ No active debt in {base_asset}")
+            logger.info(f"✅ No active debt in {base_asset}")
         else:
-            print(f"💳 Active debt detected: {borrowed} {base_asset}")
+            logger.info(f"💳 Active debt detected: {borrowed} {base_asset}")
 
             missing = borrowed - free_base
 
@@ -399,7 +447,7 @@ def handle_pre_trade_cleanup(symbol: str):
 
                 buy_params = {"symbol": symbol, "side": "BUY", "type": "MARKET", "quantity": qty_str, "timestamp": _now_ms()}
                 send_signed_request("POST", "/sapi/v1/margin/order", buy_params)
-                print(f"🛒 Bought {qty_str} {base_asset} to reduce debt")
+                logger.info(f"🛒 Bought {qty_str} {base_asset} to reduce debt")
 
                 time.sleep(3)
 
@@ -420,16 +468,16 @@ def handle_pre_trade_cleanup(symbol: str):
             if repay_amount > 0:
                 repay_params = {"asset": base_asset, "amount": str(repay_amount), "timestamp": _now_ms()}
                 send_signed_request("POST", "/sapi/v1/margin/repay", repay_params)
-                print(f"💰 Repay executed: {repay_amount} {base_asset}")
+                logger.info(f"💰 Repay executed: {repay_amount} {base_asset}")
 
             remaining = borrowed - repay_amount
             if remaining > 0:
-                print(f"⚠️ Remaining debt after repay: {remaining:.8f} {base_asset}")
+                logger.info(f"⚠️ Remaining debt after repay: {remaining:.8f} {base_asset}")
             else:
-                print(f"✅ Debt fully cleared for {base_asset}")
+                logger.info(f"✅ Debt fully cleared for {base_asset}")
 
     except Exception as e:
-        print(f"⚠️ Error during repay in {base_asset}: {e}")
+        logger.error(f"⚠️ Error during repay in {base_asset}: {e}")
 
     # === 3️⃣ Sell residual balance ===
     try:
@@ -448,20 +496,20 @@ def handle_pre_trade_cleanup(symbol: str):
         free = float(asset_data["free"])
 
         if free <= 0:
-            print(f"ℹ️ No residual {base_asset} to sell")
+            logger.info(f"ℹ️ No residual {base_asset} to sell")
             return
 
         qty_str = floor_to_step_str(free, lot["stepSize_str"])
         if float(qty_str) <= 0:
-            print(f"ℹ️ Residual {base_asset} too small to sell")
+            logger.info(f"ℹ️ Residual {base_asset} too small to sell")
             return
 
         sell_params = {"symbol": symbol, "side": "SELL", "type": "MARKET", "quantity": qty_str, "timestamp": _now_ms()}
         send_signed_request("POST", "/sapi/v1/margin/order", sell_params)
-        print(f"🧹 Sold residual {qty_str} {base_asset} to USDC")
+        logger.info(f"🧹 Sold residual {qty_str} {base_asset} to USDC")
 
     except Exception as e:
-        print(f"⚠️ Error selling residual {base_asset}: {e}")
+        logger.error(f"⚠️ Error selling residual {base_asset}: {e}")
 
 
 # ====== MAIN FUNCTIONS ======
@@ -489,7 +537,7 @@ def execute_long_margin(symbol, webhook_data=None):
         except Exception:
             pass
 
-    print(f"📈 LONG opened {symbol}: qty={executed_qty} (spent≈{(entry_price * executed_qty) if entry_price else 'unknown'})")
+    logger.info(f"📈 LONG opened {symbol}: qty={executed_qty} (spent≈{(entry_price * executed_qty) if entry_price else 'unknown'})")
 
     if executed_qty > 0 and entry_price:
         sl_from_web = None
@@ -509,11 +557,11 @@ def execute_short_margin(symbol, webhook_data=None):
         r = _request_with_retries("GET", f"{BASE_URL}/api/v3/ticker/price", params={"symbol": symbol})
         price_est = float(r.get("price", 0))
     except Exception as e:
-        print(f"⚠️ Could not fetch price for {symbol}: {e}")
+        logger.error(f"⚠️ Could not fetch price for {symbol}: {e}")
         return {"error": "price_fetch_failed"}
 
     if price_est <= 0:
-        print("⚠️ Price estimate invalid, aborting short.")
+        logger.error("⚠️ Price estimate invalid, aborting short.")
         return {"error": "invalid_price_est"}
 
     risk_pct = resolve_risk_pct(webhook_data)
@@ -522,12 +570,12 @@ def execute_short_margin(symbol, webhook_data=None):
 
     if borrow_amount <= 0 or borrow_amount < lot.get("minQty", 0.0):
         msg = f"Qty {borrow_amount} < minQty {lot.get('minQty')}"
-        print("⚠️", msg)
+        logger.error("⚠️", msg)
         return {"error": "qty_too_small", "detail": msg}
 
     if (borrow_amount * price_est) < lot.get("minNotional", 0.0):
         msg = f"Notional {borrow_amount * price_est:.8f} < minNotional {lot.get('minNotional')}"
-        print("⚠️", msg)
+        logger.error("⚠️", msg)
         return {"error": "notional_too_small", "detail": msg}
 
     borrow_params = {"asset": symbol.replace("USDC", ""), "amount": format(Decimal(str(borrow_amount)), "f"), "timestamp": _now_ms()}
@@ -538,12 +586,12 @@ def execute_short_margin(symbol, webhook_data=None):
     else:
         borrowed_qty = borrow_amount
 
-    print(f"📥 Borrowed {borrowed_qty} {symbol.replace('USDC','')} (requested {borrow_amount})")
+    logger.info(f"📥 Borrowed {borrowed_qty} {symbol.replace('USDC','')} (requested {borrow_amount})")
 
     qty_str = floor_to_step_str(float(borrowed_qty), lot["stepSize_str"])
     if float(qty_str) < lot.get("minQty", 0.0):
         msg = f"After borrow qty {qty_str} < minQty {lot.get('minQty')}"
-        print("⚠️", msg)
+        logger.error("⚠️", msg)
         return {"error": "borrowed_qty_too_small", "detail": msg}
 
     params = {"symbol": symbol, "side": "SELL", "type": "MARKET", "quantity": qty_str, "timestamp": _now_ms()}
@@ -564,7 +612,7 @@ def execute_short_margin(symbol, webhook_data=None):
         except Exception:
             pass
 
-    print(f"📉 SHORT opened {symbol}: qty={executed_qty} (spent≈{(entry_price * executed_qty) if entry_price else 'unknown'})")
+    logger.info(f"📉 SHORT opened {symbol}: qty={executed_qty} (spent≈{(entry_price * executed_qty) if entry_price else 'unknown'})")
 
     if executed_qty > 0 and entry_price:
         sl_from_web = None
@@ -588,7 +636,7 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
         use_tp = tp_override is not None or (TP_OVERRIDE and TP_PCT is not None)
 
         if not use_sl and not use_tp:
-            print(f"ℹ️ No SL/TP requested for {symbol}")
+            logger.info(f"ℹ️ No SL/TP requested for {symbol}")
             return True
 
         # === Price calculation ===
@@ -628,7 +676,6 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
             sl_price_aligned = align_price(sl_price, lot["tickSize_str"], sl_rounding)
             sl_price_str = f"{sl_price_aligned:.{decimals}f}"
 
-            # stopLimitPrice: slightly inside SL to satisfy Binance
             if side == "BUY":
                 stop_limit_aligned = align_price(sl_price_aligned * 0.999, lot["tickSize_str"], ROUND_DOWN)
             else:
@@ -658,11 +705,11 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
                 continue
             price_f = float(price_str)
             if price_f <= 0 or price_f < lot["tickSize"]:
-                print(f"⚠️ Skipping {label} for {symbol}: price {price_f} < tickSize {lot['tickSize']}")
+                logger.error(f"⚠️ Skipping {label} for {symbol}: price {price_f} < tickSize {lot['tickSize']}")
                 return False
             notional = price_f * qty_f
             if notional < lot.get("minNotional", 0.0):
-                print(f"⚠️ Skipping {label} for {symbol}: notional {notional:.8f} < minNotional {lot.get('minNotional')}")
+                logger.error(f"⚠️ Skipping {label} for {symbol}: notional {notional:.8f} < minNotional {lot.get('minNotional')}")
                 return False
 
         # ===== Place OCO =====
@@ -679,7 +726,6 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
             }
             try:
                 send_signed_request("POST", "/sapi/v1/margin/order/oco", params)
-
                 direction = 1 if side == "BUY" else -1
                 entry_f = float(entry_price)
                 tp_f = float(tp_price_str)
@@ -687,13 +733,11 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
                 profit_tp = (tp_f - entry_f) * qty_f * direction
                 loss_sl = (sl_f - entry_f) * qty_f * direction
                 rr = abs(profit_tp / loss_sl) if loss_sl != 0 else 0
-
-                print(f"📌 OCO placed for {symbol}: TP={tp_price_str}, SL={sl_price_str}, stopLimit={stop_limit_price} ({oco_side}), qty={qty_str}")
-                print(f"🟢 TP PnL ≈ {profit_tp:.2f} USDC | 🔴 SL PnL ≈ {loss_sl:.2f} USDC | ⚖️ R:R {rr:.2f}")
-
+                logger.info(f"📌 OCO placed for {symbol}: TP={tp_price_str}, SL={sl_price_str}, stopLimit={stop_limit_price} ({oco_side}), qty={qty_str}")
+                logger.info(f"🟢 TP PnL ≈ {profit_tp:.2f} USDC | 🔴 SL PnL ≈ {loss_sl:.2f} USDC | ⚖️ R:R {rr:.2f}")
                 return True
             except Exception as e:
-                print(f"⚠️ Failed OCO for {symbol}, payload={params}: {e}")
+                logger.error(f"⚠️ Failed OCO for {symbol}, payload={params}: {e}")
                 return False
 
         # ===== SL ONLY =====
@@ -709,7 +753,7 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
                 "timestamp": _now_ms()
             }
             send_signed_request("POST", "/sapi/v1/margin/order", params)
-            print(f"🛑 SL placed for {symbol}: stop={sl_price_str}, limit={stop_limit_price}, qty={qty_str}")
+            logger.info(f"🛑 SL placed for {symbol}: stop={sl_price_str}, limit={stop_limit_price}, qty={qty_str}")
             return True
 
         # ===== TP ONLY =====
@@ -724,11 +768,11 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
                 "timestamp": _now_ms()
             }
             send_signed_request("POST", "/sapi/v1/margin/order", params)
-            print(f"🎯 TP placed for {symbol}: price={tp_price_str}, qty={qty_str}")
+            logger.info(f"🎯 TP placed for {symbol}: price={tp_price_str}, qty={qty_str}")
             return True
 
     except Exception as e:
-        print(f"⚠️ Could not place SL/TP for {symbol}: {e}")
+        logger.error(f"⚠️ Could not place SL/TP for {symbol}: {e}")
         return False
 
 
@@ -741,7 +785,7 @@ def check_milestones(total_balance_usdc: float):
         if total_balance_usdc >= milestone and milestone not in REACHED_MILESTONES:
             REACHED_MILESTONES.add(milestone)
 
-            print(
+            logger.info(
                 f"🎉🎉 CONGRATS! 🎉🎉\n"
                 f"💰 You reached {milestone:,.0f} USDC\n"
                 f"🚀 Keep it up. Compounding is working.\n"
@@ -752,9 +796,9 @@ def check_milestones(total_balance_usdc: float):
 # ====== ADMIN FUNCTIONS ======
 def clear(symbol=None):
     if symbol:
-        print(f"🔁 Converting {symbol} to USDC...")
+        logger.admin(f"🔁 Converting {symbol} to USDC...")
     else:
-        print("🔁 Converting ALL assets to USDC...")
+        logger.admin("🔁 Converting ALL assets to USDC...")
 
     account = get_margin_account()
     cleared_symbols = []
@@ -773,19 +817,19 @@ def clear(symbol=None):
             continue
 
         try:
-            print(f"↪ Clearing {free_qty} {asset_name}")
+            logger.admin(f"↪ Clearing {free_qty} {asset_name}")
             handle_pre_trade_cleanup(asset_symbol)
             cleared_symbols.append(asset_symbol)
 
         except Exception as e:
-            print(f"⚠️ Could not convert {asset_symbol}: {e}")
+            logger.error(f"⚠️ Could not convert {asset_symbol}: {e}")
             failed_symbols.append({"symbol": asset_symbol, "error": str(e)})
 
-    print("✅ CLEAR completed")
+    logger.admin("✅ CLEAR completed")
     return {"cleared": cleared_symbols, "failed": failed_symbols}
 
 def read():
-    print("📊 Reading Cross Margin account snapshot...")
+    logger.admin("📊 Reading Cross Margin account snapshot...")
 
     acc = get_margin_account()
 
@@ -820,25 +864,25 @@ def read():
     total_balance_usdc = float(acc["totalNetAssetOfBtc"]) * btc_usdc_price
     margin_level = float(acc["marginLevel"])
 
-    print("────────── 📊 ACCOUNT VARIABLES 📊 ──────────")
-    print(f"├─ 🤖 Trading Enabled      : {TRADING_ENABLED}")
-    print(f"├─ 🧪 Testnet Mode         : {TESTNET}")
-    print(f"├─ 🟥 Stop Loss Override   : {SL_OVERRIDE}")
-    print(f"├─ 🟩 Take Profit Override : {TP_OVERRIDE}")
-    print(f"├─ 🔴 Stop Loss Value      : {SL_PCT}")
-    print(f"├─ 🟢 Take Profit Value    : {TP_PCT}")
-    print(f"├─ 🔄 Retries Value        : {RETRIES}")
-    print("────────── 📊 ACCOUNT SNAPSHOT 📊 ──────────")
-    print(f"├─ 💰 Total Balance (USDC) : {total_balance_usdc:.8f}")
-    print(f"├─ 💸 USDC Balance         : {usdc_balance:.8f}")
-    print(f"├─ 💳 USDC Borrowed        : {usdc_borrowed:.8f}")
-    print(f"├─ 📉 Total Debt           : {total_debt:.8f}")
-    print(f"├─ ⚖️ Margin Level         : {margin_level}")
-    print(f"├─ 🧾 Assets with balance:")
+    logger.admin("────────── 📊 ACCOUNT VARIABLES 📊 ──────────")
+    logger.admin(f"├─ 🤖 Trading Enabled      : {TRADING_ENABLED}")
+    logger.admin(f"├─ 🧪 Testnet Mode         : {TESTNET}")
+    logger.admin(f"├─ 🟥 Stop Loss Override   : {SL_OVERRIDE}")
+    logger.admin(f"├─ 🟩 Take Profit Override : {TP_OVERRIDE}")
+    logger.admin(f"├─ 🔴 Stop Loss Value      : {SL_PCT}")
+    logger.admin(f"├─ 🟢 Take Profit Value    : {TP_PCT}")
+    logger.admin(f"├─ 🔄 Retries Value        : {RETRIES}")
+    logger.admin("────────── 📊 ACCOUNT SNAPSHOT 📊 ──────────")
+    logger.admin(f"├─ 💰 Total Balance (USDC) : {total_balance_usdc:.8f}")
+    logger.admin(f"├─ 💸 USDC Balance         : {usdc_balance:.8f}")
+    logger.admin(f"├─ 💳 USDC Borrowed        : {usdc_borrowed:.8f}")
+    logger.admin(f"├─ 📉 Total Debt           : {total_debt:.8f}")
+    logger.admin(f"├─ ⚖️ Margin Level         : {margin_level}")
+    logger.admin(f"├─ 🧾 Assets with balance:")
     for a in assets_with_balance:
-        print(f"│   ├─ {a['asset']} : {a['balance']}")
+        logger.admin(f"│   ├─ {a['asset']} : {a['balance']}")
 
-    print("──────────────────────────────────────────────")
+    logger.admin("──────────────────────────────────────────────")
 
     snapshot = {
         "TRADING_ENABLED": TRADING_ENABLED,
@@ -860,14 +904,14 @@ def read():
 
     return snapshot
 def borrow(amount: float):
-    print(f"📥 ADMIN BORROW requested: {amount} USDC")
+    logger.admin(f"📥 ADMIN BORROW requested: {amount} USDC")
 
     if amount <= 0:
         raise ValueError("Borrow amount must be > 0")
 
     acc = get_margin_account()
     margin_level = float(acc["marginLevel"])
-    print(f"🧮 Current Margin Level: {margin_level:.2f}")
+    logger.admin(f"🧮 Current Margin Level: {margin_level:.2f}")
 
     if margin_level < 2:
         raise Exception("Margin level too low to safely borrow USDC")
@@ -876,11 +920,11 @@ def borrow(amount: float):
 
     resp = send_signed_request("POST", "/sapi/v1/margin/loan", params)
 
-    print(f"✅ BORROW completed: {amount} USDC")
+    logger.admin(f"✅ BORROW completed: {amount} USDC")
     return resp
 
 def repay(amount):
-    print(f"💳 ADMIN REPAY requested: {amount}")
+    logger.admin(f"💳 ADMIN REPAY requested: {amount}")
 
     if isinstance(amount, str) and amount.lower() == "all":
         margin_info = get_margin_account()
@@ -892,11 +936,11 @@ def repay(amount):
                 break
 
         if borrowed_usdc <= 0:
-            print("ℹ️ No USDC debt to repay")
+            logger.admin("ℹ️ No USDC debt to repay")
             return {"status": "nothing_to_repay"}
 
         amount = borrowed_usdc
-        print(f"🔁 REPAY ALL → {amount} USDC")
+        logger.admin(f"🔁 REPAY ALL → {amount} USDC")
 
     amount = Decimal(str(amount))
     if amount <= 0:
@@ -906,7 +950,7 @@ def repay(amount):
 
     resp = send_signed_request("POST", "/sapi/v1/margin/repay", params)
 
-    print(f"✅ REPAY completed: {amount} USDC")
+    logger.admin(f"✅ REPAY completed: {amount} USDC")
     return resp
 
 def set_trading_state(state):
@@ -914,11 +958,11 @@ def set_trading_state(state):
 
     if state == "on":
         TRADING_ENABLED = True
-        print("▶️ ADMIN ACTION: Trading RESUMED")
+        logger.admin("▶️ ADMIN ACTION: Trading RESUMED")
 
     elif state == "off":
         TRADING_ENABLED = False
-        print("⏸️ ADMIN ACTION: Trading PAUSED")
+        logger.admin("⏸️ ADMIN ACTION: Trading PAUSED")
 
     else:
         return {"status": "error", "msg": "invalid state"}
@@ -930,11 +974,11 @@ def set_testnet_state(state):
 
     if state == "on":
         TESTNET = True
-        print("🧪 ADMIN ACTION: TESTNET MODE ENABLED")
+        logger.admin("🧪 ADMIN ACTION: TESTNET MODE ENABLED")
 
     elif state == "off":
         TESTNET = False
-        print("🌐 ADMIN ACTION: LIVE MODE ENABLED")
+        logger.admin("🌐 ADMIN ACTION: LIVE MODE ENABLED")
 
     else:
         return {"status": "error", "msg": "invalid state"}
@@ -948,11 +992,11 @@ def set_sl(state=None, value=None):
 
         if state == "on":
             SL_OVERRIDE = True
-            print("🟢 SL override ENABLED")
+            logger.admin("🟢 SL override ENABLED")
 
         elif state == "off":
             SL_OVERRIDE = False
-            print("🔴 SL override DISABLED")
+            logger.admin("🔴 SL override DISABLED")
 
         else:
             return {"status": "error", "msg": "invalid state"}
@@ -967,7 +1011,7 @@ def set_sl(state=None, value=None):
             return {"status": "error", "msg": "invalid SL value"}
 
         SL_PCT = max(0.1, min(value, 50))
-        print(f"🛠️ ADMIN ACTION: SL value updated → {SL_PCT}")
+        logger.admin(f"🛠️ ADMIN ACTION: SL value updated → {SL_PCT}")
         return {"status": "ok", "sl_value": SL_PCT}
 
     return {"status": "error", "msg": "no state or value provided"}
@@ -979,11 +1023,11 @@ def set_tp(state=None, value=None):
 
         if state == "on":
             TP_OVERRIDE = True
-            print("🟢 TP override ENABLED")
+            logger.admin("🟢 TP override ENABLED")
 
         elif state == "off":
             TP_OVERRIDE = False
-            print("🔴 TP override DISABLED")
+            logger.admin("🔴 TP override DISABLED")
 
         else:
             return {"status": "error", "msg": "invalid state"}
@@ -998,7 +1042,7 @@ def set_tp(state=None, value=None):
             return {"status": "error", "msg": "invalid TP value"}
 
         TP_PCT = max(0.1, min(value, 50))
-        print(f"🛠️ ADMIN ACTION: TP value updated → {TP_PCT}")
+        logger.admin(f"🛠️ ADMIN ACTION: TP value updated → {TP_PCT}")
         return {"status": "ok", "tp_value": TP_PCT}
 
     return {"status": "error", "msg": "no state or value provided"}
@@ -1014,20 +1058,20 @@ def set_retries(value=None):
             return {"status": "error", "msg": "invalid RETRIES value"}
 
         RETRIES = max(1, min(value, 5))
-        print(f"🛠️ ADMIN ACTION: RETRIES value updated → {RETRIES}")
+        logger.admin(f"🛠️ ADMIN ACTION: RETRIES value updated → {RETRIES}")
         return {"status": "ok", "retries_value": RETRIES}
 
     return {"status": "error", "msg": "no state or value provided"}
 
 def restore():
     global RETRIES, SL_PCT, TP_PCT
-    print("🛠️ ADMIN ACTION: RESTORE default trading parameters")
+    logger.admin("🛠️ ADMIN ACTION: RESTORE default trading parameters")
     RETRIES = DEFAULT_RETRIES
     SL_PCT = DEFAULT_SL_PCT
     TP_PCT = DEFAULT_TP_PCT
-    print(f"🔄 RETRIES restored → {RETRIES}")
-    print(f"🔄 SL_PCT restored → {SL_PCT}")
-    print(f"🔄 TP_PCT restored → {TP_PCT}")
+    logger.admin(f"🔄 RETRIES restored → {RETRIES}")
+    logger.admin(f"🔄 SL_PCT restored → {SL_PCT}")
+    logger.admin(f"🔄 TP_PCT restored → {TP_PCT}")
     return {"status": "ok", "RETRIES": RETRIES, "SL_PCT": SL_PCT, "TP_PCT": TP_PCT}
 
 def logout(ip):
@@ -1039,7 +1083,7 @@ def get_btc_usdc_price():
     return float(r.json()["price"])
 
 def get_margin_account():
-    print("📊 Fetching margin account info...")
+    logger.info("📊 Fetching margin account info...")
     params = {}
     acc = send_signed_request("GET", "/sapi/v1/margin/account", params)
     return acc
@@ -1088,7 +1132,7 @@ def admin_session_active(ip):
     last_seen = ADMIN_SESSIONS[ip]
 
     if now - last_seen > ADMIN_SESSION_TIMEOUT:
-        print(f"🔒 Admin session expired for {ip}")
+        logger.admin(f"🔒 Admin session expired for {ip}")
         del ADMIN_SESSIONS[ip]
         return False
 
@@ -1097,12 +1141,12 @@ def admin_session_active(ip):
 
 def create_admin_session(ip):
     ADMIN_SESSIONS[ip] = time.time()
-    print(f"🔓 Admin session opened for {ip}")
+    logger.admin(f"🔓 Admin session opened for {ip}")
 
 def destroy_admin_session(ip):
     if ip in ADMIN_SESSIONS:
         del ADMIN_SESSIONS[ip]
-        print(f"🔒 Admin session closed for {ip}")
+        logger.admin(f"🔒 Admin session closed for {ip}")
 
 
 # ====== FLASK WEBHOOK ======
@@ -1117,7 +1161,7 @@ def webhook():
     if not data:
         return jsonify({"error": "Empty payload"}), 400
 
-    print(f"📩 Webhook received: {sanitize_payload(data)}")
+    logger.info(f"📩 Webhook received: {sanitize_payload(data)}")
 
     # 🔐 ADMIN LOGIN (without action)
     if data.get("admin_key") == ADMIN_KEY and "action" not in data:
@@ -1136,15 +1180,15 @@ def webhook():
             create_admin_session(client_ip)
 
         if not admin_session_active(client_ip):
-            print(f"🚫 Unauthorized admin access from {client_ip}")
+            logger.error(f"🚫 Unauthorized admin access from {client_ip}")
             return jsonify({"error": "admin_auth_required"}), 403
 
-        print(f"🛠️ ADMIN ACTION RECEIVED: {action} from {client_ip}")
+        logger.admin(f"🛠️ ADMIN ACTION RECEIVED: {action} from {client_ip}")
 
         handler = ADMIN_ACTIONS.get(action)
 
         if not handler:
-            print("❓ Unknown action")
+            logger.error("❓ Unknown action")
             return jsonify({"error": "Unknown action"}), 400
 
         if action == "CLEAR":
@@ -1196,12 +1240,12 @@ def webhook():
         return response
 
     if "symbol" not in data or "side" not in data:
-        print("❓ Missing trading fields")
+        logger.error("❓ Missing trading fields")
         return jsonify({"error": "Missing trading fields"}), 400
 
     if TRADING_KEY:
         if data.get("trading_key") != TRADING_KEY:
-            print("🚫 Invalid or missing trading_key")
+            logger.error("🚫 Invalid or missing trading_key")
             return jsonify({"status": "blocked", "reason": "invalid trading key"}), 403
 
     symbol = data["symbol"]
@@ -1209,11 +1253,11 @@ def webhook():
 
     # 🧮 CHECK MARGIN LEVEL
     if not check_margin_level():
-        print("⛔ Trading blocked by margin safety system (critical)")
+        logger.warning("⛔ Trading blocked by margin safety system (critical)")
         return jsonify({"status": "blocked", "reason": "margin critical"}), 200
 
     if TRADING_BLOCKED:
-        print("⛔ Trading blocked by margin safety system")
+        logger.admin("⛔ Trading blocked by margin safety system")
         return jsonify({"status": "blocked", "reason": "margin protection"}), 200
 
     handle_pre_trade_cleanup(symbol)
@@ -1221,7 +1265,7 @@ def webhook():
     check_margin_level()
 
     if TRADING_BLOCKED:
-        print("⛔ Trading blocked due to margin protection")
+        logger.admin("⛔ Trading blocked due to margin protection")
         return jsonify({"status": "blocked_by_margin"}), 200
 
     if side == "BUY":
@@ -1240,7 +1284,37 @@ def health():
     return jsonify({"bot_ready": BOT_READY, "trading_enabled": TRADING_ENABLED, "uptime_seconds": uptime, "mode": "TESTNET" if TESTNET else "LIVE"})
 
 
+@app.route("/logs")
+def download_logs():
+    key = request.args.get("key")
+    if key != ADMIN_KEY:
+        return {"error": "unauthorized"}, 403
+
+    filename = request.args.get("file", "bot.log")
+    return send_file(filename, as_attachment=True)
+
+
+@app.route("/logs/list")
+def list_logs():
+
+    files = []
+
+    for f in os.listdir():
+        if f.startswith("bot.log"):
+
+            stats = os.stat(f)
+
+            files.append({
+                "name": f,
+                "size_mb": round(stats.st_size / (1024 * 1024), 2),
+                "modified": datetime.fromtimestamp(stats.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+            })
+
+    files.sort(key=lambda x: x["modified"], reverse=True)
+    return jsonify({"logs": files})
+
+
 # ====== FLASK EXECUTION ======
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
-
+    
