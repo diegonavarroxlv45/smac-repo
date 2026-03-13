@@ -1286,12 +1286,21 @@ def health():
 
 @app.route("/logs")
 def download_logs():
+
     key = request.args.get("key")
     if key != ADMIN_KEY:
         return {"error": "unauthorized"}, 403
 
     filename = request.args.get("file", "bot.log")
-    return send_file(filename, as_attachment=True)
+
+    if not os.path.exists(filename):
+        return {"error": "file not found"}, 404
+
+    return send_file(
+        filename,
+        as_attachment=True,
+        mimetype="text/plain"
+    )
 
 
 @app.route("/logs/list")
@@ -1317,4 +1326,4 @@ def list_logs():
 # ====== FLASK EXECUTION ======
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
-    
+
