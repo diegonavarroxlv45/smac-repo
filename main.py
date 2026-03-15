@@ -7,38 +7,48 @@
 
 # ====== IMPORTS ======
 import os
+import io
 import time
 import math
 import hmac
 import hashlib
+import zipfile
 import logging
 import requests
 import functools
+from threading import Lock
 from datetime import datetime
+from urllib.parse import urlencode
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
-from flask import Flask, request, jsonify, send_file
 from logging.handlers import TimedRotatingFileHandler
+from flask import Flask, request, jsonify, send_file, render_template_string, Response
+
 
 # ====== SETTINGS ======
 print = functools.partial(print, flush=True)
 app = Flask(__name__)
 
 
+# ====== TRADE LOCK ======
+TRADE_LOCK = Lock()
+
 # ====== LOGGING ======
-logger = logging.getLogger("bot")
+logger = logging.getLogger("sgnt")
 logger.setLevel(logging.INFO)
 
 handler = TimedRotatingFileHandler(
-    "bot.log",
+    "sgnt.log",
     when="midnight",
-    interval=30,
-    backupCount=12
+    interval=1,
+    backupCount=90,
+    encoding="utf-8"
 )
 
 formatter = logging.Formatter(
     "%(asctime)s | %(levelname)s | %(filename)s:%(lineno)d | %(message)s",
 )
 
+handler.suffix = "%Y-%m-%d.log"
 handler.setFormatter(formatter)
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(formatter)
@@ -60,6 +70,10 @@ logging.Logger.admin = admin
 DEFAULT_RETRIES = 3
 DEFAULT_SL_PCT = 2.0
 DEFAULT_TP_PCT = 4.0
+DEFAULT_TRADING = True
+DEFAULT_TESTNET = False
+DEFAULT_SL_OVERRIDE = True
+DEFAULT_TP_OVERRIDE = True
 
 # --- ENVIRONMENT VARIABLES ---
 RETRIES = int(os.getenv("RETRIES", "3"))
@@ -75,8 +89,8 @@ DEPLOY_GRACE_PERIOD = int(os.getenv("DEPLOY_GRACE_PERIOD", "120"))
 PORT = int(os.getenv("PORT", "5000"))
 
 # --- BOOL VARIABLES ---
+TRADING = os.getenv("TRADING", "true").lower() == "true"
 TESTNET = os.getenv("TESTNET", "false").lower() == "true"
-TRADING_ENABLED = os.getenv("TRADING_ENABLED", "true").lower() == "true"
 SL_OVERRIDE = os.getenv("SL_OVERRIDE", "true").lower() == "true"
 TP_OVERRIDE = os.getenv("TP_OVERRIDE", "true").lower() == "true"
 
@@ -87,7 +101,12 @@ TESTNET_API_KEY = os.getenv("TESTNET_API_KEY")
 TESTNET_API_SECRET = os.getenv("TESTNET_API_SECRET")
 TRADING_KEY = os.getenv("TRADING_KEY")
 ADMIN_KEY = os.getenv("ADMIN_KEY")
+LOG_KEY = os.getenv("LOG_KEY")
 
+
+# ====== SAFE DEPLOYMENT PATTERN ======
+BOOT_TIME = time.time()
+BOT_READY = False
 
 # ====== APIS ======
 BASE_URL = "https://api.binance.com"
@@ -133,10 +152,6 @@ else:
     BASE_URL = "https://api.binance.com"
 
 
-# ====== SAFE DEPLOYMENT PATTERN ======
-BOOT_TIME = time.time()
-BOT_READY = False
-
 # --- BASIC CONNECTIVITY CHECK ---
 def _check_binance_connectivity():
     try:
@@ -151,11 +166,8 @@ def send_public_request(http_method: str, path: str, params=None):
     url = f"{BASE_URL}{path}"
 
     try:
-        return _request_with_retries(
-            http_method,
-            url,
-            params=params
-        )
+        return _request_with_retries(http_method, url, params=params)
+
     except Exception as e:
         logger.error(f"⚠️ Public request failed {path}: {e}")
         raise
@@ -186,8 +198,8 @@ def health_check():
 def is_bot_ready():
     global BOT_READY
 
-    if not TRADING_ENABLED:
-        logger.info("🛑 Trading manually disabled (TRADING_ENABLED=false)")
+    if not TRADING:
+        logger.info("🛑 Trading manually disabled (TRADING=false)")
         return False
 
     if BOT_READY:
@@ -218,7 +230,7 @@ def trading_guard():
         return False, (
             jsonify({
                 "status": "booting_or_unhealthy",
-                "trading_enabled": TRADING_ENABLED
+                "trading": TRADING
             }),
             200
         )
@@ -321,6 +333,12 @@ try:
 except Exception as e:
     logger.error(f"❌ Error loading exchange info: {e}")
     raise
+
+# ====== LOG DEPLOY ======
+now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+logger.info(f"🚀 Deployed at {now}")
+logger.info(f"________________________________________")
+
 
 # ====== PRICE ADJUST (tickSize) ======
 def format_price_to_tick(price: float, tick_size_str: str, rounding=ROUND_DOWN) -> str:
@@ -664,7 +682,7 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
 
         decimals = lot["tickSize_str"].split('.')[-1].find('1')
         if decimals < 0:
-            decimals = 8  # fallback
+            decimals = 8
 
         # === Align SL/TP to tickSize ===
         sl_price_str = None
@@ -865,7 +883,7 @@ def read():
     margin_level = float(acc["marginLevel"])
 
     logger.admin("────────── 📊 ACCOUNT VARIABLES 📊 ──────────")
-    logger.admin(f"├─ 🤖 Trading Enabled      : {TRADING_ENABLED}")
+    logger.admin(f"├─ 🤖 Trading              : {TRADING}")
     logger.admin(f"├─ 🧪 Testnet Mode         : {TESTNET}")
     logger.admin(f"├─ 🟥 Stop Loss Override   : {SL_OVERRIDE}")
     logger.admin(f"├─ 🟩 Take Profit Override : {TP_OVERRIDE}")
@@ -885,7 +903,7 @@ def read():
     logger.admin("──────────────────────────────────────────────")
 
     snapshot = {
-        "TRADING_ENABLED": TRADING_ENABLED,
+        "TRADING": TRADING,
         "TESTNET": TESTNET,
         "SL_OVERRIDE": SL_OVERRIDE,
         "TP_OVERRIDE": TP_OVERRIDE,
@@ -917,9 +935,7 @@ def borrow(amount: float):
         raise Exception("Margin level too low to safely borrow USDC")
 
     params = {"asset": "USDC", "amount": format(amount, "f"), "timestamp": _now_ms()}
-
     resp = send_signed_request("POST", "/sapi/v1/margin/loan", params)
-
     logger.admin(f"✅ BORROW completed: {amount} USDC")
     return resp
 
@@ -947,27 +963,25 @@ def repay(amount):
         raise ValueError("Repay amount must be > 0")
 
     params = {"asset": "USDC", "amount": format(amount, "f"), "timestamp": _now_ms()}
-
     resp = send_signed_request("POST", "/sapi/v1/margin/repay", params)
-
     logger.admin(f"✅ REPAY completed: {amount} USDC")
     return resp
 
 def set_trading_state(state):
-    global TRADING_ENABLED
+    global TRADING
 
     if state == "on":
-        TRADING_ENABLED = True
+        TRADING = True
         logger.admin("▶️ ADMIN ACTION: Trading RESUMED")
 
     elif state == "off":
-        TRADING_ENABLED = False
+        TRADING = False
         logger.admin("⏸️ ADMIN ACTION: Trading PAUSED")
 
     else:
         return {"status": "error", "msg": "invalid state"}
 
-    return {"status": "ok", "trading_enabled": TRADING_ENABLED}
+    return {"status": "ok", "trading": TRADING}
 
 def set_testnet_state(state):
     global TESTNET
@@ -993,11 +1007,9 @@ def set_sl(state=None, value=None):
         if state == "on":
             SL_OVERRIDE = True
             logger.admin("🟢 SL override ENABLED")
-
         elif state == "off":
             SL_OVERRIDE = False
             logger.admin("🔴 SL override DISABLED")
-
         else:
             return {"status": "error", "msg": "invalid state"}
 
@@ -1024,11 +1036,9 @@ def set_tp(state=None, value=None):
         if state == "on":
             TP_OVERRIDE = True
             logger.admin("🟢 TP override ENABLED")
-
         elif state == "off":
             TP_OVERRIDE = False
             logger.admin("🔴 TP override DISABLED")
-
         else:
             return {"status": "error", "msg": "invalid state"}
 
@@ -1064,15 +1074,31 @@ def set_retries(value=None):
     return {"status": "error", "msg": "no state or value provided"}
 
 def restore():
-    global RETRIES, SL_PCT, TP_PCT
+    global RETRIES, SL_PCT, TP_PCT, TRADING, TESTNET, SL_OVERRIDE, TP_OVERRIDE
     logger.admin("🛠️ ADMIN ACTION: RESTORE default trading parameters")
     RETRIES = DEFAULT_RETRIES
     SL_PCT = DEFAULT_SL_PCT
     TP_PCT = DEFAULT_TP_PCT
+    TRADING = DEFAULT_TRADING
+    TESTNET = DEFAULT_TESTNET
+    SL_OVERRIDE = DEFAULT_SL_OVERRIDE
+    TP_OVERRIDE = DEFAULT_TP_OVERRIDE
     logger.admin(f"🔄 RETRIES restored → {RETRIES}")
     logger.admin(f"🔄 SL_PCT restored → {SL_PCT}")
     logger.admin(f"🔄 TP_PCT restored → {TP_PCT}")
-    return {"status": "ok", "RETRIES": RETRIES, "SL_PCT": SL_PCT, "TP_PCT": TP_PCT}
+    logger.admin(f"🔄 TRADING restored → {TRADING}")
+    logger.admin(f"🔄 TESTNET restored → {TESTNET}")
+    logger.admin(f"🔄 SL_OVERRIDE restored → {SL_OVERRIDE}")
+    logger.admin(f"🔄 TP_OVERRIDE restored → {TP_OVERRIDE}")
+    return {"status": "ok", "RETRIES": RETRIES, "SL_PCT": SL_PCT, "TP_PCT": TP_PCT, "TRADING": TRADING, "TESTNET": TESTNET, "SL_OVERRIDE": SL_OVERRIDE, "TP_OVERRIDE": TP_OVERRIDE}
+
+def log_url():
+    url = request.host_url.rstrip("/")
+    params = urlencode({"key": LOG_KEY})
+    log_url = f"{url}/logs?{params}"
+    logger.admin(f"🌐 LOG LIST URL:")
+    logger.admin(f"{log_url}")
+    return {"log_download_url": log_url}
 
 def logout(ip):
     destroy_admin_session(ip)
@@ -1099,6 +1125,7 @@ ADMIN_ACTIONS = {
     "TP": set_tp,
     "RETRIES": set_retries,
     "RESTORE": restore,
+    "LOG_URL": log_url,
     "LOGOUT": logout
 }
 
@@ -1130,7 +1157,6 @@ def admin_session_active(ip):
         return False
 
     last_seen = ADMIN_SESSIONS[ip]
-
     if now - last_seen > ADMIN_SESSION_TIMEOUT:
         logger.admin(f"🔒 Admin session expired for {ip}")
         del ADMIN_SESSIONS[ip]
@@ -1148,6 +1174,14 @@ def destroy_admin_session(ip):
         del ADMIN_SESSIONS[ip]
         logger.admin(f"🔒 Admin session closed for {ip}")
 
+def require_admin():
+    client_ip = get_client_ip()
+    if not admin_session_active(client_ip):
+        logger.error(f"🚫 Unauthorized admin access from {client_ip}")
+        return None
+
+    return client_ip
+
 
 # ====== FLASK WEBHOOK ======
 @app.route("/webhook", methods=["POST"])
@@ -1162,77 +1196,6 @@ def webhook():
         return jsonify({"error": "Empty payload"}), 400
 
     logger.info(f"📩 Webhook received: {sanitize_payload(data)}")
-
-    # 🔐 ADMIN LOGIN (without action)
-    if data.get("admin_key") == ADMIN_KEY and "action" not in data:
-        client_ip = get_client_ip()
-        create_admin_session(client_ip)
-        return jsonify({"status": "admin_session_started"}), 200
-
-    # 🔐 ADMIN MODE
-    if "action" in data:
-
-        action = data["action"].upper()
-        state = data.get("state", "").lower()
-        client_ip = get_client_ip()
-
-        if data.get("admin_key") == ADMIN_KEY:
-            create_admin_session(client_ip)
-
-        if not admin_session_active(client_ip):
-            logger.error(f"🚫 Unauthorized admin access from {client_ip}")
-            return jsonify({"error": "admin_auth_required"}), 403
-
-        logger.admin(f"🛠️ ADMIN ACTION RECEIVED: {action} from {client_ip}")
-
-        handler = ADMIN_ACTIONS.get(action)
-
-        if not handler:
-            logger.error("❓ Unknown action")
-            return jsonify({"error": "Unknown action"}), 400
-
-        if action == "CLEAR":
-            symbol = data.get("symbol")
-            result = handler(symbol)
-            return jsonify({"status": "ok", "action": action, "result": result}), 200
-
-        elif action == "READ":
-            snapshot = handler()
-            return jsonify(snapshot), 200
-
-        elif action == "BORROW":
-            amount = float(data.get("amount", 0))
-            handler(amount)
-            return jsonify({"status": "ok", "action": action, "amount": amount}), 200
-
-        elif action == "REPAY":
-            amount = data.get("amount", 0)
-            if isinstance(amount, str):
-                amount = amount.lower()
-            handler(amount)
-            return jsonify({"status": "ok", "action": action, "amount": amount}), 200
-
-        elif action in ["TRADING", "TESTNET"]:
-            result = handler(state)
-            return jsonify({"action": action, "state": state, **result}), 200
-
-        elif action in ["SL", "TP"]:
-            value = data.get("value")
-            result = handler(state=state if state else None, value=value)
-            return jsonify({"action": action, "state": state, "value": value, **result}), 200
-
-        elif action == "RETRIES":
-            value = data.get("value")
-            result = handler(value)
-            return jsonify({"action": action, "value": value, **result}), 200
-
-        if action == "RESTORE":
-            result = handler()
-            return jsonify({"status": "ok", **result}), 200
-
-        elif action == "LOGOUT":
-            result = handler(client_ip)
-            return jsonify({"action": action, **result}), 200
 
     # 📈 TRADING MODE (TradingView)
     allowed, response = trading_guard()
@@ -1251,76 +1214,368 @@ def webhook():
     symbol = data["symbol"]
     side = data["side"].upper()
 
-    # 🧮 CHECK MARGIN LEVEL
-    if not check_margin_level():
-        logger.warning("⛔ Trading blocked by margin safety system (critical)")
-        return jsonify({"status": "blocked", "reason": "margin critical"}), 200
+    with TRADE_LOCK:
 
-    if TRADING_BLOCKED:
-        logger.admin("⛔ Trading blocked by margin safety system")
-        return jsonify({"status": "blocked", "reason": "margin protection"}), 200
+        logger.info("🔒 TRADE LOCK ACQUIRED")
 
-    handle_pre_trade_cleanup(symbol)
+        if not check_margin_level():
+            logger.warning("⛔ Trading blocked by margin safety system (critical)")
+            return jsonify({"status": "blocked", "reason": "margin critical"}), 200
 
-    check_margin_level()
+        if TRADING_BLOCKED:
+            logger.admin("⛔ Trading blocked by margin safety system")
+            return jsonify({"status": "blocked", "reason": "margin protection"}), 200
 
-    if TRADING_BLOCKED:
-        logger.admin("⛔ Trading blocked due to margin protection")
-        return jsonify({"status": "blocked_by_margin"}), 200
+        handle_pre_trade_cleanup(symbol)
+        check_margin_level()
 
-    if side == "BUY":
-        resp = execute_long_margin(symbol, webhook_data=data)
-    elif side == "SELL":
-        resp = execute_short_margin(symbol, webhook_data=data)
-    else:
-        return jsonify({"error": "Invalid side"}), 400
+        if TRADING_BLOCKED:
+            logger.admin("⛔ Trading blocked due to margin protection")
+            return jsonify({"status": "blocked_by_margin"}), 200
+
+        if side == "BUY":
+            resp = execute_long_margin(symbol, webhook_data=data)
+        elif side == "SELL":
+            resp = execute_short_margin(symbol, webhook_data=data)
+        else:
+            return jsonify({"error": "Invalid side"}), 400
+
+        logger.info("🔓 TRADE LOCK RELEASED")
+
 
     return jsonify({"status": "ok", "result": resp}), 200
+
+
+@app.route("/login", methods=["POST"])
+def admin_login():
+
+    try:
+        data = request.get_json(force=True)
+    except:
+        return jsonify({"error": "Invalid JSON"}), 400
+
+    if not data:
+        return jsonify({"error": "Empty payload"}), 400
+
+    if data.get("admin_key") != ADMIN_KEY:
+        logger.error("🚫 Invalid admin key")
+        return jsonify({"error": "invalid key"}), 403
+
+    client_ip = get_client_ip()
+    create_admin_session(client_ip)
+
+    return jsonify({"status": "admin_session_started"}), 200
+
+
+@app.route("/clear", methods=["GET"])
+def admin_clear():
+
+    if not require_admin():
+        return jsonify({"error": "admin_auth_required"}), 403
+
+    symbol = request.args.get("symbol")
+
+    result = clear(symbol)
+
+    return jsonify({"status": "ok", "result": result}), 200
+
+
+@app.route("/read", methods=["GET"])
+def admin_read():
+
+    if not require_admin():
+        return jsonify({"error": "admin_auth_required"}), 403
+
+    snapshot = read()
+
+    return jsonify(snapshot), 200
+
+
+@app.route("/borrow", methods=["GET"])
+def admin_borrow():
+
+    if not require_admin():
+        return jsonify({"error": "admin_auth_required"}), 403
+    try:
+        amount = float(request.args.get("amount", 0))
+    except:
+        return jsonify ({"error": "Invalid amount"}), 400
+
+    result = borrow(amount)
+
+    return jsonify({"status": "ok", "amount": amount, "result": result}), 200
+
+
+@app.route("/repay", methods=["GET"])
+def admin_repay():
+
+    if not require_admin():
+        return jsonify({"error": "admin_auth_required"}), 403
+
+    amount = request.args.get("amount", "all")
+
+    result = repay(amount)
+
+    return jsonify({"status": "ok", "amount": amount, "result": result}), 200
+
+
+@app.route("/trading", methods=["GET"])
+def admin_trading():
+
+    if not require_admin():
+        return jsonify({"error": "admin_auth_required"}), 403
+
+    state = request.args.get("state", "").lower()
+
+    result = set_trading_state(state)
+
+    return jsonify(result), 200
+
+
+@app.route("/testnet", methods=["GET"])
+def admin_testnet():
+
+    if not require_admin():
+        return jsonify({"error": "admin_auth_required"}), 403
+
+    state = request.args.get("state", "").lower()
+
+    result = set_testnet_state(state)
+
+    return jsonify(result), 200
+
+
+@app.route("/sl", methods=["GET"])
+def admin_sl():
+
+    if not require_admin():
+        return jsonify({"error": "admin_auth_required"}), 403
+
+    state = request.args.get("state")
+    value = request.args.get("value")
+
+    result = set_sl(state=state, value=value)
+
+    return jsonify(result), 200
+
+
+@app.route("/tp", methods=["GET"])
+def admin_tp():
+
+    if not require_admin():
+        return jsonify({"error": "admin_auth_required"}), 403
+
+    state = request.args.get("state")
+    value = request.args.get("value")
+
+    result = set_tp(state=state, value=value)
+
+    return jsonify(result), 200
+
+
+@app.route("/retries", methods=["GET"])
+def admin_retries():
+
+    if not require_admin():
+        return jsonify({"error": "admin_auth_required"}), 403
+
+    value = request.args.get("value")
+
+    result = set_retries(value)
+
+    return jsonify(result), 200
+
+
+@app.route("/restore", methods=["GET"])
+def admin_restore():
+
+    if not require_admin():
+        return jsonify({"error": "admin_auth_required"}), 403
+
+    result = restore()
+
+    return jsonify(result), 200
+
+
+@app.route("/log_url", methods=["GET"])
+def admin_log_url():
+
+    if not require_admin():
+        return jsonify({"error": "admin_auth_required"}), 403
+
+    result = log_url()
+
+    return jsonify(result), 200
+
+
+@app.route("/logout", methods=["GET"])
+def admin_logout():
+
+    client_ip = require_admin()
+
+    if not client_ip:
+        return jsonify({"error": "admin_auth_required"}), 403
+
+    destroy_admin_session(client_ip)
+
+    return jsonify({"status": "logged_out"}), 200
 
 
 @app.route("/health", methods=["GET"])
 def health():
     uptime = int(time.time() - BOOT_TIME)
-    return jsonify({"bot_ready": BOT_READY, "trading_enabled": TRADING_ENABLED, "uptime_seconds": uptime, "mode": "TESTNET" if TESTNET else "LIVE"})
+    return jsonify({"bot_ready": BOT_READY, "trading": TRADING, "uptime_seconds": uptime, "mode": "TESTNET" if TESTNET else "LIVE"})
 
 
 @app.route("/logs")
-def download_logs():
+def logs():
 
     key = request.args.get("key")
-    if key != ADMIN_KEY:
+    if key != LOG_KEY:
         return {"error": "unauthorized"}, 403
 
-    filename = request.args.get("file", "bot.log")
+    filename = request.args.get("file")
+    level = request.args.get("level")
+    download_all = request.args.get("download")
 
-    if not os.path.exists(filename):
-        return {"error": "file not found"}, 404
+    # 📦 DOWNLOAD ALL LOGS AS ZIP
+    if download_all == "all":
 
-    return send_file(
-        filename,
-        as_attachment=True,
-        mimetype="text/plain"
-    )
+        memory_file = io.BytesIO()
 
+        with zipfile.ZipFile(memory_file, "w") as zf:
+            for f in os.listdir("."):
+                if f.endswith(".log") and os.path.isfile(f):
+                    zf.write(f)
 
-@app.route("/logs/list")
-def list_logs():
+        memory_file.seek(0)
 
-    files = []
+        return send_file(
+            memory_file,
+            as_attachment=True,
+            download_name="sgnt_logs.zip",
+            mimetype="application/zip"
+        )
 
-    for f in os.listdir():
-        if f.startswith("bot.log"):
+    # 📥 LOG DOWNLOAD
+    if filename:
 
-            stats = os.stat(f)
+        if not os.path.exists(filename):
+            return {"error": "file not found"}, 404
 
-            files.append({
+        # 🔎 FILTER BY LABEL
+        if level:
+
+            filtered_lines = []
+
+            with open(filename, "r", encoding="utf-8") as f:
+                for line in f:
+                    if level in line:
+                        filtered_lines.append(line)
+
+            filtered_content = "".join(filtered_lines)
+
+            return Response(
+                filtered_content,
+                mimetype="text/plain",
+                headers={
+                    "Content-Disposition":
+                    f"attachment; filename={filename}({level}).log"
+                }
+            )
+
+        # 📥 NORMAL DOWNLOAD
+        return send_file(
+            filename,
+            as_attachment=True,
+            mimetype="text/plain"
+        )
+
+    # 🧾 LOG LISTING
+    log_files = []
+
+    for f in os.listdir("."):
+        if f.endswith(".log") and os.path.isfile(f):
+
+            size_mb = os.path.getsize(f) / (1024 * 1024)
+            modified = os.path.getmtime(f)
+
+            log_files.append({
                 "name": f,
-                "size_mb": round(stats.st_size / (1024 * 1024), 2),
-                "modified": datetime.fromtimestamp(stats.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+                "size_mb": f"{size_mb:.2f} MB",
+                "modified": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(modified))
             })
 
-    files.sort(key=lambda x: x["modified"], reverse=True)
-    return jsonify({"logs": files})
+    log_files.sort(key=lambda x: x["modified"], reverse=True)
+
+    html = """
+    <html>
+    <head>
+        <title>SGNT Logs</title>
+    </head>
+    <body>
+
+        <h2>Log list</h2>
+
+        <p>
+            <a href="/logs?download=all&key={{ key }}">
+                <button>Download ALL logs (ZIP)</button>
+            </a>
+        </p>
+
+        <table border="1" cellpadding="6">
+            <tr>
+                <th>File</th>
+                <th>Size</th>
+                <th>Last modification</th>
+                <th>Download</th>
+                <th>Filters</th>
+            </tr>
+
+            {% for log in logs %}
+
+            <tr>
+                <td>{{ log.name }}</td>
+                <td>{{ log.size_mb }}</td>
+                <td>{{ log.modified }}</td>
+
+                <td>
+                    <a href="/logs?file={{ log.name }}&key={{ key }}">
+                        <button>Download</button>
+                    </a>
+                </td>
+
+                <td>
+
+                    <a href="/logs?file={{ log.name }}&level=INFO&key={{ key }}">
+                        <button>INFO</button>
+                    </a>
+
+                    <a href="/logs?file={{ log.name }}&level=WARNING&key={{ key }}">
+                        <button>WARNING</button>
+                    </a>
+
+                    <a href="/logs?file={{ log.name }}&level=ERROR&key={{ key }}">
+                        <button>ERROR</button>
+                    </a>
+
+                    <a href="/logs?file={{ log.name }}&level=ADMIN&key={{ key }}">
+                        <button>ADMIN</button>
+                    </a>
+
+                </td>
+
+            </tr>
+
+            {% endfor %}
+
+        </table>
+
+    </body>
+    </html>
+    """
+
+    return render_template_string(html, logs=log_files, key=LOG_KEY)
 
 
 # ====== FLASK EXECUTION ======
