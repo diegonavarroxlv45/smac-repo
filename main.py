@@ -25,12 +25,10 @@ from flask import Flask, request, jsonify, send_file, render_template_string, Re
 
 
 # ====== SETTINGS ======
+TRADE_LOCK = Lock()
 print = functools.partial(print, flush=True)
 app = Flask(__name__)
 
-
-# ====== TRADE LOCK ======
-TRADE_LOCK = Lock()
 
 # ====== LOGGING ======
 logger = logging.getLogger("sgnt")
@@ -38,9 +36,9 @@ logger.setLevel(logging.INFO)
 
 handler = TimedRotatingFileHandler(
     "sgnt.log",
-    when="midnight",
-    interval=1,
-    backupCount=90,
+    when="D",
+    interval=90,
+    backupCount=4,
     encoding="utf-8"
 )
 
@@ -104,10 +102,6 @@ ADMIN_KEY = os.getenv("ADMIN_KEY")
 LOG_KEY = os.getenv("LOG_KEY")
 
 
-# ====== SAFE DEPLOYMENT PATTERN ======
-BOOT_TIME = time.time()
-BOT_READY = False
-
 # ====== APIS ======
 BASE_URL = "https://api.binance.com"
 EXCANGE_INFO = None
@@ -151,6 +145,10 @@ else:
     BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
     BASE_URL = "https://api.binance.com"
 
+
+# ====== SAFE DEPLOYMENT PATTERN ======
+BOOT_TIME = time.time()
+BOT_READY = False
 
 # --- BASIC CONNECTIVITY CHECK ---
 def _check_binance_connectivity():
@@ -238,11 +236,6 @@ def trading_guard():
     return True, None
 
 
-# ====== GLOBAL RISK STATE ======
-TRADING_BLOCKED = False
-MARGIN_MAX_RISK_PCT = MAX_RISK_PCT
-
-
 # ====== TIME FUNCTION ======
 def _now_ms():
     return int(time.time() * 1000)
@@ -307,12 +300,6 @@ def get_balance_margin(asset="USDC") -> float:
     bal = next((b for b in data.get("userAssets", []) if b["asset"] == asset), None)
     return float(bal["free"]) if bal else 0.0
 
-def load_exchange_info():
-    global EXCHANGE_INFO
-    logger.info("📡 Loading exchange info...")
-    EXCHANGE_INFO = send_public_request("GET", "/api/v3/exchangeInfo")
-    logger.info("✅ Exchange info loaded")
-
 def get_symbol_lot(symbol):
     data = EXCHANGE_INFO
     for s in data["symbols"]:
@@ -328,6 +315,12 @@ def get_symbol_lot(symbol):
 
 
 # ===== LOAD EXCHANGE INFO =====
+def load_exchange_info():
+    global EXCHANGE_INFO
+    logger.info("📡 Loading exchange info...")
+    EXCHANGE_INFO = send_public_request("GET", "/api/v3/exchangeInfo")
+    logger.info("✅ Exchange info loaded")
+
 try:
     load_exchange_info()
 except Exception as e:
@@ -360,6 +353,9 @@ def tick_decimals(tick_str: str):
 
 
 # ====== CHECK MARGIN LEVEL BEFORE OPERATING ======
+TRADING_BLOCKED = False
+MARGIN_MAX_RISK_PCT = MAX_RISK_PCT
+
 def check_margin_level():
     global TRADING_BLOCKED, MARGIN_MAX_RISK_PCT
 
@@ -400,6 +396,17 @@ def check_margin_level():
     except Exception as e:
         logger.error(f"⚠️ Could not fetch margin level: {e}")
         return True
+
+
+# ====== CENSORING KEYS ======
+SENSITIVE_FIELDS = {"admin_key", "trading_key"}
+
+def sanitize_payload(payload: dict) -> dict:
+    clean = payload.copy()
+    for field in SENSITIVE_FIELDS:
+        if field in clean:
+            clean[field] = "***REDACTED***"
+    return clean
 
 
 # ====== PRE-TRADE CLEANUP ======
@@ -919,8 +926,8 @@ def read():
     }
 
     check_milestones(total_balance_usdc)
-
     return snapshot
+
 def borrow(amount: float):
     logger.admin(f"📥 ADMIN BORROW requested: {amount} USDC")
 
@@ -973,11 +980,9 @@ def set_trading_state(state):
     if state == "on":
         TRADING = True
         logger.admin("▶️ ADMIN ACTION: Trading RESUMED")
-
     elif state == "off":
         TRADING = False
         logger.admin("⏸️ ADMIN ACTION: Trading PAUSED")
-
     else:
         return {"status": "error", "msg": "invalid state"}
 
@@ -989,11 +994,9 @@ def set_testnet_state(state):
     if state == "on":
         TESTNET = True
         logger.admin("🧪 ADMIN ACTION: TESTNET MODE ENABLED")
-
     elif state == "off":
         TESTNET = False
         logger.admin("🌐 ADMIN ACTION: LIVE MODE ENABLED")
-
     else:
         return {"status": "error", "msg": "invalid state"}
 
@@ -1130,17 +1133,6 @@ ADMIN_ACTIONS = {
 }
 
 
-# ====== CENSORING KEYS ======
-SENSITIVE_FIELDS = {"admin_key", "trading_key"}
-
-def sanitize_payload(payload: dict) -> dict:
-    clean = payload.copy()
-    for field in SENSITIVE_FIELDS:
-        if field in clean:
-            clean[field] = "***REDACTED***"
-    return clean
-
-
 # ====== ADMIN SESSION SYSTEM ======
 ADMIN_SESSIONS = {}
 ADMIN_SESSION_TIMEOUT = 300
@@ -1197,7 +1189,6 @@ def webhook():
 
     logger.info(f"📩 Webhook received: {sanitize_payload(data)}")
 
-    # 📈 TRADING MODE (TradingView)
     allowed, response = trading_guard()
     if not allowed:
         return response
@@ -1581,4 +1572,3 @@ def logs():
 # ====== FLASK EXECUTION ======
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
-
