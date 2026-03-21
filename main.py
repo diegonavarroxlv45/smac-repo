@@ -90,7 +90,7 @@ PORT = int(os.getenv("PORT", "5000"))
 TRADE_COUNTER = 0
 DAILY_LONGS = 0
 DAILY_SHORTS = 0
-CURRENT_DAY = datetime.uctnow().date()
+CURRENT_DAY = datetime.utcnow().date()
 
 # --- BOOL VARIABLES ---
 TRADING = os.getenv("TRADING", "true").lower() == "true"
@@ -110,9 +110,8 @@ LOG_KEY = os.getenv("LOG_KEY")
 
 # ====== APIS ======
 BASE_URL = "https://api.binance.com"
-EXCANGE_INFO = None
+EXCHANGE_INFO = None
 
-# --- BINANCE API ---
 if not BINANCE_API_KEY and not BINANCE_API_SECRET:
     logger.error("❌ BINANCE_API_KEY and BINANCE_API_SECRET are NOT defined")
     raise RuntimeError("Missing Binance API credentials")
@@ -128,7 +127,6 @@ if not BINANCE_API_SECRET:
 else:
     logger.info("🔐 Binance API credentials loaded successfully")
 
-# --- TESTNET API ---
 if not TESTNET_API_KEY and not TESTNET_API_SECRET:
     logger.error("❌ TESTNET_API_KEY and TESTNET_API_SECRET are NOT defined")
     raise RuntimeError("Missing Testnet API credentials")
@@ -249,11 +247,13 @@ def _now_ms():
 
 
 # ====== SIGNING AND REQUESTING ======
+# --- SIGNING ---
 def sign_params_query(params: dict, secret: str):
     query = "&".join([f"{k}={v}" for k, v in params.items()])
     signature = hmac.new(secret.encode(), query.encode(), hashlib.sha256).hexdigest()
     return query, signature
 
+# --- REQUESTING ---
 def _request_with_retries(method: str, url: str, **kwargs):
     for i in range(RETRIES):
         try:
@@ -263,7 +263,7 @@ def _request_with_retries(method: str, url: str, **kwargs):
                 time.sleep(3)
                 continue
 
-             if resp.status_code == 200:
+            if resp.status_code == 200:
                 try:
                     return resp.json()
                 except Exception:
@@ -275,6 +275,7 @@ def _request_with_retries(method: str, url: str, **kwargs):
         time.sleep(1)
     raise Exception("❌ Request failed after retries")
 
+# --- SEND REQUESTS ---
 def send_signed_request(http_method: str, path: str, payload: dict):
     if "timestamp" not in payload:
         payload["timestamp"] = _now_ms()
@@ -312,6 +313,9 @@ def get_balance_margin(asset="USDC") -> float:
     return float(bal["free"]) if bal else 0.0
 
 def get_symbol_lot(symbol):
+    if EXCHANGE_INFO is None:
+        logger.warning("⚠ Exchange info is none -> Reloading...")
+        load_exchange_info()
     data = EXCHANGE_INFO
     for s in data["symbols"]:
         if s["symbol"] == symbol:
@@ -319,13 +323,14 @@ def get_symbol_lot(symbol):
             ts = next((f for f in s["filters"] if f["filterType"] == "PRICE_FILTER"), None)
             mnf = next((f for f in s["filters"] if f["filterType"] in ("MIN_NOTIONAL", "NOTIONAL")), None)
             if not fs or not ts:
-                raise Exception(f"Missing LOT_SIZE or PRICE_FILTER for {symbol}")
+                raise Exception(f"❌ Missing LOT_SIZE or PRICE_FILTER for {symbol}")
             minNotional = float(mnf.get("minNotional") or mnf.get("notional") or 0.0) if mnf else 0.0
             return {"stepSize_str": fs["stepSize"], "stepSize": float(fs["stepSize"]), "minQty": float(fs.get("minQty", 0.0)), "tickSize_str": ts["tickSize"], "tickSize": float(ts["tickSize"]), "minNotional": minNotional,}
-    raise Exception(f"Symbol not found: {symbol}")
+    raise Exception(f"❌ Symbol not found: {symbol}")
 
 
-# ====== LOAD EXCHANGE INFO ======
+# ====== DEPLOY LOADING ======
+# --- LOAD EXCANGE INFO ---
 def load_exchange_info():
     global EXCHANGE_INFO
     logger.info("📡 Loading exchange info...")
@@ -338,7 +343,7 @@ except Exception as e:
     logger.error(f"❌ Error loading exchange info: {e}")
     raise
 
-# ====== LOG DEPLOY ======
+# --- LOG DEPLOY ---
 now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
 logger.info(f"🚀 Deployed at {now}")
 logger.info(f"________________________________________")
@@ -346,7 +351,7 @@ logger.info(f"________________________________________")
 
 # ====== TRADE COUNTER ======
 # --- TRADE ID ---
-def next_trade_id()
+def next_trade_id():
     global TRADE_COUNTER
     TRADE_COUNTER += 1
     return TRADE_COUNTER
@@ -497,17 +502,17 @@ def handle_pre_trade_cleanup(symbol: str):
                 qty_f = float(qty_str)
 
                 if qty_f <= 0:
-                    raise Exception("Calculated buy qty is zero after stepSize rounding")
+                    raise Exception("❌ Calculated buy qty is zero after stepSize rounding")
 
                 r = _request_with_retries("GET", f"{BASE_URL}/api/v3/ticker/price", params={"symbol": symbol})
                 price_est = float(r["price"])
 
                 if qty_f * price_est < lot["minNotional"]:
-                    raise Exception("Buy notional below minNotional, aborting repay cleanup")
+                    raise Exception("❌ Buy notional below minNotional, aborting repay cleanup")
 
                 needed_usdc = qty_f * price_est
                 if needed_usdc > free_usdc:
-                    raise Exception(f"Not enough USDC to buy repay asset (need {needed_usdc:.4f}, have {free_usdc:.4f})")
+                    raise Exception(f"❌ Not enough USDC to buy repay asset (need {needed_usdc:.4f}, have {free_usdc:.4f})")
 
                 buy_params = {"symbol": symbol, "side": "BUY", "type": "MARKET", "quantity": qty_str, "timestamp": _now_ms()}
                 send_signed_request("POST", "/sapi/v1/margin/order", buy_params)
@@ -604,7 +609,7 @@ def execute_long_margin(symbol, webhook_data=None):
     trade_id = next_trade_id()
     global DAILY_LONGS
     DAILY_LONGS += 1
-    logger.info(f"[TRADE {trade_id}] 📉 SHORT opened {symbol}: qty={executed_qty} (spent≈{(entry_price * executed_qty) if entry_price else 'unknown'})")
+    logger.info(f"[TRADE {trade_id}] 📈 LONG opened {symbol}: qty={executed_qty} (spent≈{(entry_price * executed_qty) if entry_price else 'unknown'})")
 
     if executed_qty > 0 and entry_price:
         sl_from_web = None
@@ -612,9 +617,9 @@ def execute_long_margin(symbol, webhook_data=None):
         if webhook_data:
             sl_from_web = webhook_data.get("sl")
             tp_from_web = webhook_data.get("tp")
-        place_sl_tp_margin(symbol, "BUY", entry_price, executed_qty, lot, sl_override=sl_from_web, tp_override=tp_from_web)
+        place_sl_tp_margin(symbol, "BUY", entry_price, executed_qty, lot, sl_override=sl_from_web, tp_override=tp_from_web, trade_id=trade_id)
 
-    return {"order": resp}
+    return {"order": resp, "trade_id": trade_id}
 
 def execute_short_margin(symbol, webhook_data=None):
     lot = get_symbol_lot(symbol)
@@ -629,7 +634,7 @@ def execute_short_margin(symbol, webhook_data=None):
 
     if price_est <= 0:
         logger.error(f"⚠️ Invalid price detected: {price}")
-        raise exception ("Invalid price")
+        raise exception ("❌ Invalid price")
 
     risk_pct = resolve_risk_pct(webhook_data)
     raw_qty = Decimal(str(balance_usdc * risk_pct)) / Decimal(str(price_est))
@@ -682,7 +687,7 @@ def execute_short_margin(symbol, webhook_data=None):
     trade_id = next_trade_id()
     global DAILY_SHORTS
     DAILY_SHORTS += 1
-    logger.info(f"[TRADE {trade_id}] 📈 LONG opened {symbol}: qty={executed_qty} (spent≈{(entry_price * executed_qty) if entry_price else 'unknown'})")
+    logger.info(f"[TRADE {trade_id}] 📉 SHORT opened {symbol}: qty={executed_qty} (spent≈{(entry_price * executed_qty) if entry_price else 'unknown'})")
 
     if executed_qty > 0 and entry_price:
         sl_from_web = None
@@ -690,13 +695,13 @@ def execute_short_margin(symbol, webhook_data=None):
         if webhook_data:
             sl_from_web = webhook_data.get("sl")
             tp_from_web = webhook_data.get("tp")
-        place_sl_tp_margin(symbol, "SELL", entry_price, executed_qty, lot, sl_override=sl_from_web, tp_override=tp_from_web)
+        place_sl_tp_margin(symbol, "SELL", entry_price, executed_qty, lot, sl_override=sl_from_web, tp_override=tp_from_web, trade_id=trade_id)
 
-    return {"order": resp}
+    return {"order": resp, "trade_id": trade_id}
 
 
 # ====== SL/TP FUNCTIONS ======
-def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty: float, lot: dict, sl_override=None, tp_override=None):
+def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty: float, lot: dict, sl_override=None, tp_override=None, trade_id=None):
     try:
         COMMISSION_BUFFER = Decimal("1") - (COMMISSION / Decimal("100"))
         oco_side = "SELL" if side == "BUY" else "BUY"
@@ -782,7 +787,7 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
                 logger.error(f"⚠️ Skipping {label} for {symbol}: notional {notional:.8f} < minNotional {lot.get('minNotional')}")
                 return False
 
-        # ===== Place OCO =====
+        # === Place OCO ===
         if order_type == "OCO":
             params = {
                 "symbol": symbol,
@@ -810,7 +815,7 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
                 logger.error(f"⚠️ Failed OCO for {symbol}, payload={params}: {e}")
                 return False
 
-        # ===== SL ONLY =====
+        # === SL ONLY ===
         if order_type == "SL_ONLY":
             params = {
                 "symbol": symbol,
@@ -826,7 +831,7 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
             logger.info(f"[TRADE {trade_id}] 🛑 SL placed for {symbol}: stop={sl_price_str}, limit={stop_limit_price}, qty={qty_str}")
             return True
 
-        # ===== TP ONLY =====
+        # === TP ONLY ===
         if order_type == "TP_ONLY":
             params = {
                 "symbol": symbol,
@@ -938,7 +943,7 @@ def read():
     logger.admin(f"├─ 🟢 Take Profit Value    : {TP_PCT}")
     logger.admin(f"├─ 🔄 Retries Value        : {RETRIES}")
     logger.admin("__________ 📊 TRADING STATUS 📊 ──────────")
-    logger.admin(f"├─ 📢 Last Trade ID        : {trade_id}")
+    logger.admin(f"├─ 📢 Last Trade ID        : {TRADE_COUNTER}")
     logger.admin(f"├─ 📈 Longs Today          : {DAILY_LONGS}")
     logger.admin(f"├─ 📉 Shorts Today         : {DAILY_SHORTS}")
     logger.admin("────────── 📊 ACCOUNT SNAPSHOT 📊 ──────────")
@@ -959,7 +964,7 @@ def read():
         "SL": SL_PCT,
         "TP": TP_PCT,
         "RETRIES": RETRIES,
-        "lastTradeID": trade_id,
+        "lastTradeID": TRADE_COUNTER,
         "longsToday": DAILY_LONGS,
         "shortsToday": DAILY_SHORTS,
         "totalBalanceUSDC": round(total_balance_usdc, 8),
@@ -984,7 +989,7 @@ def borrow(amount: float):
     logger.admin(f"🧮 Current Margin Level: {margin_level:.2f}")
 
     if margin_level < 2:
-        raise Exception("Margin level too low to safely borrow USDC")
+        raise Exception("❌ Margin level too low to safely borrow USDC")
 
     params = {"asset": "USDC", "amount": format(amount, "f"), "timestamp": _now_ms()}
     resp = send_signed_request("POST", "/sapi/v1/margin/loan", params)
@@ -1020,6 +1025,7 @@ def repay(amount):
 
 def set_trading_state(state):
     global TRADING
+
     if state == "on":
         TRADING = True
         logger.admin("▶️ ADMIN ACTION: Trading RESUMED")
@@ -1033,6 +1039,7 @@ def set_trading_state(state):
 
 def set_testnet_state(state):
     global TESTNET
+
     if state == "on":
         TESTNET = True
         logger.admin("🧪 ADMIN ACTION: TESTNET MODE ENABLED")
@@ -1046,6 +1053,7 @@ def set_testnet_state(state):
 
 def set_sl(state=None, value=None):
     global SL_OVERRIDE, SL_PCT
+
     if state is not None:
 
         if state == "on":
@@ -1074,6 +1082,7 @@ def set_sl(state=None, value=None):
 
 def set_tp(state=None, value=None):
     global TP_OVERRIDE, TP_PCT
+
     if state is not None:
 
         if state == "on":
@@ -1102,6 +1111,7 @@ def set_tp(state=None, value=None):
 
 def set_retries(value=None):
     global RETRIES
+
     if value is not None:
 
         try:
@@ -1117,6 +1127,7 @@ def set_retries(value=None):
 
 def restore():
     global RETRIES, SL_PCT, TP_PCT, TRADING, TESTNET, SL_OVERRIDE, TP_OVERRIDE
+
     logger.admin("🛠️ ADMIN ACTION: RESTORE default trading parameters")
     RETRIES = DEFAULT_RETRIES
     SL_PCT = DEFAULT_SL_PCT
@@ -1156,6 +1167,7 @@ def get_margin_account():
     acc = send_signed_request("GET", "/sapi/v1/margin/account", params)
     return acc
 
+# ====== ADMIN ACTIONS ======
 ADMIN_ACTIONS = {
     "CLEAR": clear,
     "READ": read,
@@ -1188,6 +1200,7 @@ def admin_session_active(ip):
         return False
 
     last_seen = ADMIN_SESSIONS[ip]
+
     if now - last_seen > ADMIN_SESSION_TIMEOUT:
         logger.admin(f"🔒 Admin session expired for {ip}")
         del ADMIN_SESSIONS[ip]
@@ -1217,7 +1230,6 @@ def require_admin():
 # ====== FLASK WEBHOOK ======
 @app.route("/webhook", methods=["POST"])
 def webhook():
-
     try:
         data = request.get_json(force=True)
     except Exception:
@@ -1230,6 +1242,7 @@ def webhook():
     logger.info(f"📩 Webhook received: {sanitize_payload(data)}")
 
     allowed, response = trading_guard()
+
     if not allowed:
         return response
 
@@ -1266,21 +1279,22 @@ def webhook():
 
         if side == "BUY":
             resp = execute_long_margin(symbol, webhook_data=data)
+            trade_id = resp.get("trade_id")
         elif side == "SELL":
             resp = execute_short_margin(symbol, webhook_data=data)
+            trade_id = resp.get("trade_id")
         else:
             return jsonify({"error": "Invalid side"}), 400
 
         latency = time.time() - start
-        logger.info(f"[TRADE {trade_id}] ⏳ Trade execution latency: {latency.2f}s")
-        logger.info("[TRADE {trade_id}] 🔓 TRADE LOCK RELEASED")
+        logger.info(f"[TRADE {trade_id}] ⏳ Trade execution latency: {latency:.2f}s")
+        logger.info(f"[TRADE {trade_id}] 🔓 TRADE LOCK RELEASED")
 
     return jsonify({"status": "ok", "result": resp}), 200
 
 
 @app.route("/login", methods=["POST"])
 def admin_login():
-
     try:
         data = request.get_json(force=True)
     except:
@@ -1300,7 +1314,6 @@ def admin_login():
 
 @app.route("/clear", methods=["GET"])
 def admin_clear():
-
     if not require_admin():
         return jsonify({"error": "admin_auth_required"}), 403
 
@@ -1311,7 +1324,6 @@ def admin_clear():
 
 @app.route("/read", methods=["GET"])
 def admin_read():
-
     if not require_admin():
         return jsonify({"error": "admin_auth_required"}), 403
 
@@ -1321,7 +1333,6 @@ def admin_read():
 
 @app.route("/borrow", methods=["GET"])
 def admin_borrow():
-
     if not require_admin():
         return jsonify({"error": "admin_auth_required"}), 403
     try:
@@ -1335,7 +1346,6 @@ def admin_borrow():
 
 @app.route("/repay", methods=["GET"])
 def admin_repay():
-
     if not require_admin():
         return jsonify({"error": "admin_auth_required"}), 403
     try:
@@ -1349,7 +1359,6 @@ def admin_repay():
 
 @app.route("/trading", methods=["GET"])
 def admin_trading():
-
     if not require_admin():
         return jsonify({"error": "admin_auth_required"}), 403
 
@@ -1360,7 +1369,6 @@ def admin_trading():
 
 @app.route("/testnet", methods=["GET"])
 def admin_testnet():
-
     if not require_admin():
         return jsonify({"error": "admin_auth_required"}), 403
 
@@ -1371,7 +1379,6 @@ def admin_testnet():
 
 @app.route("/sl", methods=["GET"])
 def admin_sl():
-
     if not require_admin():
         return jsonify({"error": "admin_auth_required"}), 403
 
@@ -1383,7 +1390,6 @@ def admin_sl():
 
 @app.route("/tp", methods=["GET"])
 def admin_tp():
-
     if not require_admin():
         return jsonify({"error": "admin_auth_required"}), 403
 
@@ -1395,7 +1401,6 @@ def admin_tp():
 
 @app.route("/retries", methods=["GET"])
 def admin_retries():
-
     if not require_admin():
         return jsonify({"error": "admin_auth_required"}), 403
 
@@ -1406,7 +1411,6 @@ def admin_retries():
 
 @app.route("/restore", methods=["GET"])
 def admin_restore():
-
     if not require_admin():
         return jsonify({"error": "admin_auth_required"}), 403
 
@@ -1416,7 +1420,6 @@ def admin_restore():
 
 @app.route("/log_url", methods=["GET"])
 def admin_log_url():
-
     if not require_admin():
         return jsonify({"error": "admin_auth_required"}), 403
 
@@ -1426,7 +1429,6 @@ def admin_log_url():
 
 @app.route("/logout", methods=["GET"])
 def admin_logout():
-
     client_ip = require_admin()
 
     if not client_ip:
@@ -1438,14 +1440,12 @@ def admin_logout():
 
 @app.route("/health", methods=["GET"])
 def health():
-
     uptime = int(time.time() - BOOT_TIME)
     return jsonify({"bot_ready": BOT_READY, "trading": TRADING, "uptime_seconds": uptime, "mode": "TESTNET" if TESTNET else "LIVE"})
 
 
 @app.route("/logs")
 def logs():
-
     key = request.args.get("key")
     if key != LOG_KEY:
         return {"error": "unauthorized"}, 403
