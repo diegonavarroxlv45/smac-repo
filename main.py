@@ -16,18 +16,76 @@ import zipfile
 import logging
 import requests
 import functools
-from threading import Lock
+import threading
+from collections import deque
 from datetime import datetime
+from threading import Lock, Thread
 from urllib.parse import urlencode
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
+from concurrent.futures import ThreadPoolExecutor
 from logging.handlers import TimedRotatingFileHandler
-from flask import Flask, request, jsonify, send_file, render_template_string, Response
+from flask import Flask, request, jsonify, redirect, url_for, send_file, render_template_string, Response
 
 
 # ====== SETTINGS ======
-TRADE_LOCK = Lock()
+TRADE_LOCK = threading.RLock()
 print = functools.partial(print, flush=True)
 app = Flask(__name__)
+executor = ThreadPoolExecutor(max_workers=3)
+
+
+# ====== VARIABLES ======
+# --- DEFAULT VARIABLES ---
+DFT_RETRIES = 3
+DFT_SL_PCT = 2.0
+DFT_TP_PCT = 4.0
+DFT_TRADING = True
+DFT_TESTNET = False
+DFT_SL_OVERRIDE = True
+DFT_TP_OVERRIDE = True
+DFT_LOG_VIEW = 50
+
+# --- ENVIRONMENT VARIABLES ---
+LOG_VIEW = int(os.getenv("LOG_VIEW", "50"))                      # NUMBER
+RETRIES = int(os.getenv("RETRIES", "3"))                         # NUMBER
+SL_PCT = float(os.getenv("SL_PCT", "2"))                         # %
+TP_PCT = float(os.getenv("TP_PCT", "4"))                         # %
+MAX_RISK_PCT = float(os.getenv("MAX_RISK_PCT", "20"))            # %
+MAX_RISK_PCT = max(0.1, min(MAX_RISK_PCT, 20))                   # %
+DEFAULT_RISK_PCT = float(os.getenv("DEFAULT_RISK_PCT", "5"))     # %
+DEFAULT_RISK_PCT = max(0.1, min(DEFAULT_RISK_PCT, MAX_RISK_PCT)) # %
+COMMISSION = Decimal(os.getenv("COMMISSION", "0.1"))             # %
+MAX_SNAPSHOTS = int(os.getenv("MAX_SNAPSHOTS", "500"))           # NUMBER
+SNAPSHOT_INTERVAL = int(os.getenv("SNAPSHOT_INTERVAL", "1"))     # DAYS
+BOOT_PERIOD = int(os.getenv("BOOT_PERIOD", "1"))                 # MINUTES
+GRACE_PERIOD = int(os.getenv("GRACE_PERIOD", "2"))               # MINUTES
+ADMIN_TIMEOUT = int(os.getenv("ADMIN_TIMEOUT", "5"))             # MINUTES
+LOGIN_WINDOW = int(os.getenv("LOGIN_WINDOW", "5"))               # MINUTES
+MAX_LOGIN_ATTEMPTS = int(os.getenv("MAX_LOGIN_ATTEMPTS", "5"))   # NUMBER
+PORT = int(os.getenv("PORT", "5000"))                            # NUMBER
+
+# --- TRADE COUNTER VARIABLES ---
+TRADE_COUNTER = 0
+DAILY_LONGS = 0
+DAILY_SHORTS = 0
+TOTAL_LONGS = 0
+TOTAL_SHORTS = 0
+CURRENT_DAY = datetime.utcnow().date()
+LAST_TRADE = None
+
+# --- BOOL VARIABLES ---
+TRADING = os.getenv("TRADING", "true").lower() == "true"
+TESTNET = os.getenv("TESTNET", "false").lower() == "true"
+SL_OVERRIDE = os.getenv("SL_OVERRIDE", "true").lower() == "true"
+TP_OVERRIDE = os.getenv("TP_OVERRIDE", "true").lower() == "true"
+
+# --- SECRET VARIABLES ---
+BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
+BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
+TESTNET_API_KEY = os.getenv("TESTNET_API_KEY")
+TESTNET_API_SECRET = os.getenv("TESTNET_API_SECRET")
+TRADING_KEY = os.getenv("TRADING_KEY")
+ADMIN_KEY = os.getenv("ADMIN_KEY")
 
 
 # ====== LOGGING ======
@@ -62,108 +120,49 @@ def admin(self, message, *args, **kwargs):
 
 logging.Logger.admin = admin
 
+DATE_LEVEL = 26
+logging.addLevelName(DATE_LEVEL, "DATE")
 
-# ====== VARIABLES ======
-# --- DEFAULT VARIABLES ---
-DEFAULT_RETRIES = 3
-DEFAULT_SL_PCT = 2.0
-DEFAULT_TP_PCT = 4.0
-DEFAULT_TRADING = True
-DEFAULT_TESTNET = False
-DEFAULT_SL_OVERRIDE = True
-DEFAULT_TP_OVERRIDE = True
+def date(self, message, *args, **kwargs):
+    if self.isEnabledFor(DATE_LEVEL):
+        self._log(DATE_LEVEL, message, args, **kwargs)
 
-# --- ENVIRONMENT VARIABLES ---
-RETRIES = int(os.getenv("RETRIES", "3"))
-SL_PCT = float(os.getenv("SL_PCT", "2"))
-TP_PCT = float(os.getenv("TP_PCT", "4"))
-MAX_RISK_PCT = float(os.getenv("MAX_RISK_PCT", "20"))
-MAX_RISK_PCT = max(0.1, min(MAX_RISK_PCT, 20))
-DEFAULT_RISK_PCT = float(os.getenv("DEFAULT_RISK_PCT", "5"))
-DEFAULT_RISK_PCT = max(0.1, min(DEFAULT_RISK_PCT, MAX_RISK_PCT))
-COMMISSION = Decimal(os.getenv("COMMISSION", "0.1"))
-MIN_BOOT_SECS = int(os.getenv("MIN_BOOT_SECS", "60"))
-DEPLOY_GRACE_PERIOD = int(os.getenv("DEPLOY_GRACE_PERIOD", "120"))
-PORT = int(os.getenv("PORT", "5000"))
-
-# --- TRADE COUNTER VARIABLES ---
-TRADE_COUNTER = 0
-DAILY_LONGS = 0
-DAILY_SHORTS = 0
-CURRENT_DAY = datetime.utcnow().date()
-
-# --- BOOL VARIABLES ---
-TRADING = os.getenv("TRADING", "true").lower() == "true"
-TESTNET = os.getenv("TESTNET", "false").lower() == "true"
-SL_OVERRIDE = os.getenv("SL_OVERRIDE", "true").lower() == "true"
-TP_OVERRIDE = os.getenv("TP_OVERRIDE", "true").lower() == "true"
-
-# --- SECRET VARIABLES ---
-BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
-BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
-TESTNET_API_KEY = os.getenv("TESTNET_API_KEY")
-TESTNET_API_SECRET = os.getenv("TESTNET_API_SECRET")
-TRADING_KEY = os.getenv("TRADING_KEY")
-ADMIN_KEY = os.getenv("ADMIN_KEY")
-LOG_KEY = os.getenv("LOG_KEY")
+logging.Logger.date = date
 
 
 # ====== APIS ======
-BASE_URL = "https://api.binance.com"
-EXCHANGE_INFO = None
-
-if not BINANCE_API_KEY and not BINANCE_API_SECRET:
-    logger.error("❌ BINANCE_API_KEY and BINANCE_API_SECRET are NOT defined")
-    raise RuntimeError("Missing Binance API credentials")
-
-if not BINANCE_API_KEY:
-    logger.error("❌ BINANCE_API_KEY is NOT defined")
-    raise RuntimeError("Missing BINANCE_API_KEY")
-
-if not BINANCE_API_SECRET:
-    logger.error("❌ BINANCE_API_SECRET is NOT defined")
-    raise RuntimeError("Missing BINANCE_API_SECRET")
-
-else:
-    logger.info("🔐 Binance API credentials loaded successfully")
-
-if not TESTNET_API_KEY and not TESTNET_API_SECRET:
-    logger.error("❌ TESTNET_API_KEY and TESTNET_API_SECRET are NOT defined")
-    raise RuntimeError("Missing Testnet API credentials")
-
-if not TESTNET_API_KEY:
-    logger.error("❌ BINANCE_API_KEY is NOT defined")
-    raise RuntimeError("Missing TESTNET_API_KEY")
-
-if not TESTNET_API_SECRET:
-    logger.error("❌ TESTNET_API_SECRET is NOT defined")
-    raise RuntimeError("Missing TESTNET_API_SECRET")
-
-else:
-    logger.info("🔐 Testnet API credentials loaded successfully")
-
+# --- BINANCE / TESTNET CONFIGURATION ---
 if TESTNET:
     BINANCE_API_KEY = os.getenv("TESTNET_API_KEY")
     BINANCE_API_SECRET = os.getenv("TESTNET_API_SECRET")
     BASE_URL = "https://testnet.binance.vision"
+
+    if not BINANCE_API_KEY or not BINANCE_API_SECRET:
+        logger.error("❌ Missing TESTNET API credentials")
+        raise RuntimeError("Missing TESTNET API credentials")
+
+    logger.info("🧪 Running in TESTNET mode")
+    logger.info("🔐 Testnet API credentials loaded successfully")
+
 else:
     BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
     BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
     BASE_URL = "https://api.binance.com"
 
+    if not BINANCE_API_KEY or not BINANCE_API_SECRET:
+        logger.error("❌ Missing BINANCE API credentials")
+        raise RuntimeError("Missing BINANCE API credentials")
+
+    logger.info("🌐 Running in LIVE mode")
+    logger.info("🔐 Binance API credentials loaded successfully")
+
 
 # ====== SAFE DEPLOYMENT PATTERN ======
 BOOT_TIME = time.time()
 BOT_READY = False
-
-# --- BASIC CONNECTIVITY CHECK ---
-def _check_binance_connectivity():
-    try:
-        send_public_request("GET", "/api/v3/time")
-        return True
-    except Exception as e:
-        logger.error(f"❌ Binance connectivity failed: {e}")
-        return False
+LAST_HEALTH_CHECK = 0
+HEALTH_CHECK_INTERVAL = 10
+LAST_HEALTH_STATUS = False
 
 # --- PUBLIC BINANCE REQUEST ---
 def send_public_request(http_method: str, path: str, params=None):
@@ -175,27 +174,42 @@ def send_public_request(http_method: str, path: str, params=None):
         logger.error(f"⚠️ Public request failed {path}: {e}")
         raise
 
-# --- ACCOUNT ACCESS CHECK ---
-def _check_account_access():
+# --- GLOBAL HEALTH CHECK ---
+def health_check():
+    if not BOT_READY:
+        logger.info("🩺 Running health check...")
+
+    try:
+        send_public_request("GET", "/api/v3/time")
+    except Exception as e:
+        logger.error(f"❌ Binance connectivity failed: {e}")
+        return False
+
     try:
         get_balance_margin("USDC")
-        return True
     except Exception as e:
         logger.error(f"❌ Account access failed: {e}")
         return False
 
-# --- GLOBAL HEALTH CHECK ---
-def health_check():
-    logger.info("🩺 Running health check...")
-
-    if not _check_binance_connectivity():
-        return False
-
-    if not _check_account_access():
-        return False
-
     logger.info("✅ Health check passed")
     return True
+
+def health_check_cached():
+    global LAST_HEALTH_CHECK, LAST_HEALTH_STATUS
+
+    now = time.time()
+
+    if now - LAST_HEALTH_CHECK < HEALTH_CHECK_INTERVAL:
+        return LAST_HEALTH_STATUS
+
+    try:
+        status = health_check()
+    except Exception:
+        status = False
+
+    LAST_HEALTH_CHECK = now
+    LAST_HEALTH_STATUS = status
+    return status
 
 # --- BOT READINESS STATE MACHINE ---
 def is_bot_ready():
@@ -206,25 +220,30 @@ def is_bot_ready():
         return False
 
     if BOT_READY:
+        if not health_check_cached():
+            logger.error("⚠️ Bot lost health — disabling trading")
+            BOT_READY = False
+            return False
         return True
 
     uptime = time.time() - BOOT_TIME
+    BOOT_SECS = BOOT_PERIOD * 60
+    GRACE_SECS = GRACE_PERIOD * 60
 
-    if uptime < MIN_BOOT_SECS:
-        logger.info(f"⏳ Boot protection active ({int(uptime)}s/{MIN_BOOT_SECS}s)")
+    if uptime < BOOT_SECS:
+        logger.info(f"⏳ Boot protection active ({int(uptime)}s/{BOOT_SECS}s)")
         return False
 
-    if uptime < DEPLOY_GRACE_PERIOD:
-        logger.info(f"🟡 Deploy grace period ({int(uptime)}s/{DEPLOY_GRACE_PERIOD}s)")
+    if uptime < GRACE_SECS:
+        logger.info(f"🟡 Deploy grace period ({int(uptime)}s/{GRACE_SECS}s)")
         return False
 
-    if not health_check():
+    if not health_check_cached():
         logger.error("⚠️ Bot not healthy yet")
         return False
 
     BOT_READY = True
     logger.info("🚀 BOT READY — trading ENABLED")
-
     return True
 
 # --- SAFE EXECUTION GUARD ---
@@ -286,21 +305,6 @@ def send_signed_request(http_method: str, path: str, payload: dict):
     return _request_with_retries(http_method, url, headers=headers)
 
 
-# ====== FINAL RISK RESOLUTION ======
-def resolve_risk_pct(webhook_data=None):
-
-    risk_pct = DEFAULT_RISK_PCT
-
-    if webhook_data and "risk_pct" in webhook_data:
-        try:
-            risk_pct = float(webhook_data["risk_pct"])
-        except Exception:
-            logger.error("⚠️ Invalid risk_pct from webhook")
-
-    risk_pct = min(risk_pct, MARGIN_MAX_RISK_PCT)
-    return risk_pct / 100
-
-
 # ====== BALANCE & MARKET DATA ======
 def get_balance_margin(asset="USDC") -> float:
     ts = _now_ms()
@@ -329,10 +333,129 @@ def get_symbol_lot(symbol):
     raise Exception(f"❌ Symbol not found: {symbol}")
 
 
+# ====== SNAPSHOT METRICS ======
+SNAPSHOT_HISTORY = []
+SNAPSHOT_LOCK = Lock()
+
+def start_snapshot_workers():
+    Thread(target=snapshot_worker, daemon=True).start()
+    logger.info("🚀 Snapshot worker started")
+
+def store_snapshot(snapshot):
+    global SNAPSHOT_HISTORY
+
+    with SNAPSHOT_LOCK:
+        clean_snapshot = {
+            "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            "totalBalanceUSDC": snapshot["totalBalanceUSDC"],
+            "marginLevel": snapshot["marginLevel"],
+            "totalDebt": snapshot["totalDebt"],
+            "usdcBalance": snapshot["usdcBalance"],
+            "usdcBorrowed": snapshot["usdcBorrowed"],
+            "longsToday": snapshot["longsToday"],
+            "shortsToday": snapshot["shortsToday"],
+            "totalLongs": snapshot["totalLongs"],
+            "totalShorts": snapshot["totalShorts"]
+        }
+
+        SNAPSHOT_HISTORY.append(clean_snapshot)
+
+        if len(SNAPSHOT_HISTORY) > MAX_SNAPSHOTS:
+            SNAPSHOT_HISTORY.pop(0)
+
+def get_margin_account():
+    logger.info("📊 Fetching margin account info...")
+    params = {}
+    acc = send_signed_request("GET", "/sapi/v1/margin/account", params)
+    return acc
+
+def get_btc_usdc_price():
+    try:
+        r = _request_with_retries("GET", f"{BASE_URL}/api/v3/ticker/price", params={"symbol": "BTCUSDC"})
+        return float(r["price"])
+    except Exception as e:
+        logger.error(f"⚠️ BTC price fetch failed: {e}")
+        raise
+
+def build_snapshot():
+    acc = get_margin_account()
+
+    total_debt = 0.0
+    usdc_balance = 0.0
+    usdc_borrowed = 0.0
+    assets_with_balance = []
+
+    for asset in acc["userAssets"]:
+        borrowed = float(asset["borrowed"])
+        free = float(asset["free"])
+        locked = float(asset["locked"])
+        total_debt += borrowed
+        total_asset_balance = free + locked
+
+        if total_asset_balance > 0 and asset["asset"] != "USDC":
+            assets_with_balance.append({
+                "asset": asset["asset"],
+                "balance": round(total_asset_balance, 8)
+            })
+
+        if asset["asset"] == "USDC":
+            usdc_balance = free + locked
+            usdc_borrowed = borrowed
+
+    btc_usdc_price = get_btc_usdc_price()
+    total_balance_usdc = float(acc["totalNetAssetOfBtc"]) * btc_usdc_price
+    margin_level = float(acc["marginLevel"])
+
+    snapshot = {
+        "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+
+        # 💰 BALANCE
+        "totalBalanceUSDC": round(total_balance_usdc, 8),
+        "usdcBalance": round(usdc_balance, 8),
+        "totalDebt": round(total_debt, 8),
+        "usdcBorrowed": round(usdc_borrowed, 8),
+        "assetsWithBalance": assets_with_balance,
+
+        # ⚖️ RISK
+        "marginLevel": margin_level,
+
+        # 📈 ACTIVITY
+        "longsToday": DAILY_LONGS,
+        "shortsToday": DAILY_SHORTS,
+        "totalLongs": TOTAL_LONGS,
+        "totalShorts": TOTAL_SHORTS,
+        "tradeId": TRADE_COUNTER,
+    }
+
+    return snapshot
+
+def snapshot_worker():
+    while True:
+        try:
+            snapshot = build_snapshot()
+            store_snapshot(snapshot)
+            logger.info("📸 Snapshot stored")
+        except Exception as e:
+            logger.error(f"⚠️ Snapshot error: {e}")
+        finally:
+            logger.info(f"⏱ Next snapshot in {SNAPSHOT_INTERVAL} day(s)")
+            time.sleep(SNAPSHOT_INTERVAL * 86400)
+
+try:
+    start_snapshot_workers()
+except Exception as e:
+    logger.error(f"❌ Error starting snapshot workers: {e}")
+    raise
+
+
 # ====== DEPLOY LOADING ======
+# --- EXCHANGE INFO ---
+EXCHANGE_INFO = None
+
 # --- LOAD EXCANGE INFO ---
 def load_exchange_info():
     global EXCHANGE_INFO
+
     logger.info("📡 Loading exchange info...")
     EXCHANGE_INFO = send_public_request("GET", "/api/v3/exchangeInfo")
     logger.info("✅ Exchange info loaded")
@@ -353,8 +476,10 @@ logger.info(f"________________________________________")
 # --- TRADE ID ---
 def next_trade_id():
     global TRADE_COUNTER
-    TRADE_COUNTER += 1
-    return TRADE_COUNTER
+
+    with TRADE_LOCK:
+        TRADE_COUNTER += 1
+        return TRADE_COUNTER
 
 # --- DAILY SUMMARY ---
 def check_daily_summary():
@@ -366,15 +491,24 @@ def check_daily_summary():
         total_trades = DAILY_LONGS + DAILY_SHORTS
 
         if total_trades > 0:
-            logger.info(
+            logger.date(
                 f"📅 Day {CURRENT_DAY} completed! "
                 f"Trades: {total_trades} "
                 f"(Longs: {DAILY_LONGS} | Shorts: {DAILY_SHORTS})"
             )
+            logger.date(f"________________________________________")
 
         DAILY_LONGS = 0
         DAILY_SHORTS = 0
         CURRENT_DAY = now_day
+
+# --- DAILY WATCHER ---
+def daily_watcher():
+    while True:
+        check_daily_summary()
+        time.sleep(60)
+
+threading.Thread(target=daily_watcher, daemon=True).start()
 
 
 # ====== PRICE ADJUST (tickSize) ======
@@ -407,6 +541,13 @@ def check_margin_level():
         account_info = get_margin_account()
         margin_level = float(account_info["marginLevel"])
         logger.info(f"🧮 Current Margin Level: {margin_level:.2f}")
+
+        # ⚰ FORCED LIQUIDATION
+        if margin_level <= 1.1001:
+            logger.warning("⚰ Your account got liquidated")
+            TRADING_BLOCKED = True
+            clear()
+            return False
 
         # 🚨 CRITICAL — CONTROLLED LIQUIDATION
         if margin_level < 1.16:
@@ -442,15 +583,19 @@ def check_margin_level():
         return True
 
 
-# ====== CENSORING KEYS ======
-SENSITIVE_FIELDS = {"admin_key", "trading_key"}
+# ====== FINAL RISK RESOLUTION ======
+def resolve_risk_pct(webhook_data=None):
 
-def sanitize_payload(payload: dict) -> dict:
-    clean = payload.copy()
-    for field in SENSITIVE_FIELDS:
-        if field in clean:
-            clean[field] = "***REDACTED***"
-    return clean
+    risk_pct = DEFAULT_RISK_PCT
+
+    if webhook_data and "risk_pct" in webhook_data:
+        try:
+            risk_pct = float(webhook_data["risk_pct"])
+        except Exception:
+            logger.error("⚠️ Invalid risk_pct from webhook")
+
+    risk_pct = min(risk_pct, MARGIN_MAX_RISK_PCT)
+    return risk_pct / 100
 
 
 # ====== PRE-TRADE CLEANUP ======
@@ -464,7 +609,11 @@ def handle_pre_trade_cleanup(symbol: str):
         send_signed_request("DELETE", "/sapi/v1/margin/openOrders", params)
         logger.info(f"🧹 Pending orders for {symbol} canceled")
     except Exception as e:
-        logger.error(f"⚠️ Couldn't cancel orders for {symbol}: {e}")
+        if "Unknown order sent" in str(e):
+            logger.info(f"ℹ️ No open orders to cancel for {symbol}")
+        else:
+            logger.error(f"⚠️ Couldn't cancel orders for {symbol}: {e}")
+
 
     # === 2️⃣ Repay debt ===
     try:
@@ -582,45 +731,24 @@ def handle_pre_trade_cleanup(symbol: str):
 
 
 # ====== MAIN FUNCTIONS ======
+# --- MARGIN LONG ---
 def execute_long_margin(symbol, webhook_data=None):
     lot = get_symbol_lot(symbol)
     balance_usdc = get_balance_margin("USDC")
     risk_pct = resolve_risk_pct(webhook_data)
     qty_quote = balance_usdc * risk_pct
-
-    params = {"symbol": symbol, "side": "BUY", "type": "MARKET", "quoteOrderQty": floor_to_step_str(qty_quote, lot["tickSize_str"]), "timestamp": _now_ms()}
+    params = {"symbol": symbol, "side": "BUY", "type": "MARKET", "quoteOrderQty": format(qty_quote, "f"), "timestamp": _now_ms()}
     resp = send_signed_request("POST", "/sapi/v1/margin/order", params)
-
-    executed_qty = 0.0
-    entry_price = None
-    if isinstance(resp, dict) and "fills" in resp:
-        executed_qty = sum(float(f["qty"]) for f in resp["fills"])
-        spent_quote = sum(float(f["price"]) * float(f["qty"]) for f in resp["fills"])
-        entry_price = (spent_quote / executed_qty) if executed_qty else None
-    if not entry_price and isinstance(resp, dict):
-        try:
-            executed_qty = float(resp.get("executedQty", 0) or 0)
-            cumm = float(resp.get("cummulativeQuoteQty", 0) or 0)
-            if executed_qty:
-                entry_price = cumm / executed_qty
-        except Exception:
-            pass
-
+    executed_qty, entry_price = extract_execution_info(resp)
     trade_id = next_trade_id()
-    global DAILY_LONGS
+    global DAILY_LONGS, TOTAL_LONGS
     DAILY_LONGS += 1
-    logger.info(f"[TRADE {trade_id}] 📈 LONG opened {symbol}: qty={executed_qty} (spent≈{(entry_price * executed_qty) if entry_price else 'unknown'})")
-
-    if executed_qty > 0 and entry_price:
-        sl_from_web = None
-        tp_from_web = None
-        if webhook_data:
-            sl_from_web = webhook_data.get("sl")
-            tp_from_web = webhook_data.get("tp")
-        place_sl_tp_margin(symbol, "BUY", entry_price, executed_qty, lot, sl_override=sl_from_web, tp_override=tp_from_web, trade_id=trade_id)
-
+    TOTAL_LONGS += 1
+    side = "BUY"
+    handle_post_trade(symbol, side, resp, lot, webhook_data, trade_id)
     return {"order": resp, "trade_id": trade_id}
 
+# --- MARGIN SHORT ---
 def execute_short_margin(symbol, webhook_data=None):
     lot = get_symbol_lot(symbol)
     balance_usdc = get_balance_margin("USDC")
@@ -633,48 +761,72 @@ def execute_short_margin(symbol, webhook_data=None):
         return {"error": "price_fetch_failed"}
 
     if price_est <= 0:
-        logger.error(f"⚠️ Invalid price detected: {price}")
-        raise exception ("❌ Invalid price")
+        logger.error(f"⚠️ Invalid price detected: {price_est}")
+        raise Exception ("❌ Invalid price")
 
     risk_pct = resolve_risk_pct(webhook_data)
     raw_qty = Decimal(str(balance_usdc * risk_pct)) / Decimal(str(price_est))
-    borrow_amount = float(raw_qty.quantize(Decimal(str(lot["stepSize_str"])), rounding=ROUND_DOWN))
 
-    if borrow_amount <= 0 or borrow_amount < lot.get("minQty", 0.0):
-        msg = f"Qty {borrow_amount} < minQty {lot.get('minQty')}"
-        logger.error("⚠️", msg)
-        return {"error": "qty_too_small", "detail": msg}
-
-    if (borrow_amount * price_est) < lot.get("minNotional", 0.0):
-        msg = f"Notional {borrow_amount * price_est:.8f} < minNotional {lot.get('minNotional')}"
-        logger.error("⚠️", msg)
-        return {"error": "notional_too_small", "detail": msg}
-
-    borrow_params = {"asset": symbol.replace("USDC", ""), "amount": format(Decimal(str(borrow_amount)), "f"), "timestamp": _now_ms()}
-    borrow_resp = send_signed_request("POST", "/sapi/v1/margin/loan", borrow_params)
-    borrowed_qty = None
-    if isinstance(borrow_resp, dict):
-        borrowed_qty = float(borrow_resp.get("amount") or borrow_resp.get("qty") or borrow_amount)
-    else:
-        borrowed_qty = borrow_amount
-
-    logger.info(f"📥 Borrowed {borrowed_qty} {symbol.replace('USDC','')} (requested {borrow_amount})")
-
-    qty_str = floor_to_step_str(float(borrowed_qty), lot["stepSize_str"])
-    if float(qty_str) < lot.get("minQty", 0.0):
-        msg = f"After borrow qty {qty_str} < minQty {lot.get('minQty')}"
-        logger.error("⚠️", msg)
-        return {"error": "borrowed_qty_too_small", "detail": msg}
+    try:
+        qty_str = borrowing(raw_qty, lot, price_est, symbol)
+    except Exception as e:
+        logger.error(f"❌ Borrow failed: {e}")
+        return {"error": "borrow_failed"}
 
     params = {"symbol": symbol, "side": "SELL", "type": "MARKET", "quantity": qty_str, "timestamp": _now_ms()}
     resp = send_signed_request("POST", "/sapi/v1/margin/order", params)
+    executed_qty, entry_price = extract_execution_info(resp)
+    trade_id = next_trade_id()
+    global DAILY_SHORTS, TOTAL_SHORTS
+    DAILY_SHORTS += 1
+    TOTAL_SHORTS += 1
+    side = "SELL"
+    handle_post_trade(symbol, side, resp, lot, webhook_data, trade_id)
+    return {"order": resp, "trade_id": trade_id}
 
+# --- BORROW ---
+def borrowing(raw_qty, lot, price_est, symbol):
+    borrow_amount = float(raw_qty.quantize(Decimal(str(lot["stepSize_str"])), rounding=ROUND_DOWN))
+
+    if borrow_amount <= 0 or borrow_amount < lot.get("minQty", 0.0):
+        raise Exception(f"Qty {borrow_amount} < minQty")
+
+    if (borrow_amount * price_est) < lot.get("minNotional", 0.0):
+        raise Exception("Notional too small")
+
+    borrow_params = {
+        "asset": symbol.replace("USDC", ""),
+        "amount": format(Decimal(str(borrow_amount)), "f"),
+        "timestamp": _now_ms()
+    }
+
+    borrow_resp = send_signed_request("POST", "/sapi/v1/margin/loan", borrow_params)
+    time.sleep(0.3)
+
+    borrowed_qty = float(
+        borrow_resp.get("amount") or
+        borrow_resp.get("qty") or
+        borrow_amount
+    )
+
+    logger.info(f"📥 Borrowed {borrowed_qty} {symbol.replace('USDC','')}")
+    qty_str = floor_to_step_str(borrowed_qty, lot["stepSize_str"])
+
+    if float(qty_str) < lot.get("minQty", 0.0):
+        raise Exception("Borrowed qty too small")
+
+    return qty_str
+
+# --- EXECUTION INFO ---
+def extract_execution_info(resp):
     executed_qty = 0.0
     entry_price = None
+
     if isinstance(resp, dict) and "fills" in resp:
         executed_qty = sum(float(f["qty"]) for f in resp["fills"])
         spent_quote = sum(float(f["price"]) * float(f["qty"]) for f in resp["fills"])
         entry_price = (spent_quote / executed_qty) if executed_qty else None
+
     if not entry_price and isinstance(resp, dict):
         try:
             executed_qty = float(resp.get("executedQty", 0) or 0)
@@ -684,20 +836,51 @@ def execute_short_margin(symbol, webhook_data=None):
         except Exception:
             pass
 
-    trade_id = next_trade_id()
-    global DAILY_SHORTS
-    DAILY_SHORTS += 1
-    logger.info(f"[TRADE {trade_id}] 📉 SHORT opened {symbol}: qty={executed_qty} (spent≈{(entry_price * executed_qty) if entry_price else 'unknown'})")
+    return executed_qty, entry_price
+
+# --- POST TRADE ---
+def handle_post_trade(symbol, side, resp, lot, webhook_data, trade_id):
+    executed_qty, entry_price = extract_execution_info(resp)
+
+    if executed_qty == 0:
+        logger.warning(f"[TRADE {trade_id}] ⚠️ No execution detected")
+
+    emoji = "📈" if side == "BUY" else "📉"
+    logger.info(f"[TRADE {trade_id}] {emoji} {side} executed {symbol}: qty={executed_qty} (spent≈{(entry_price * executed_qty) if entry_price is not None else 'unknown'} USDC)")
 
     if executed_qty > 0 and entry_price:
         sl_from_web = None
         tp_from_web = None
+
         if webhook_data:
             sl_from_web = webhook_data.get("sl")
             tp_from_web = webhook_data.get("tp")
-        place_sl_tp_margin(symbol, "SELL", entry_price, executed_qty, lot, sl_override=sl_from_web, tp_override=tp_from_web, trade_id=trade_id)
 
-    return {"order": resp, "trade_id": trade_id}
+        place_sl_tp_margin(
+            symbol,
+            side,
+            entry_price,
+            executed_qty,
+            lot,
+            sl_override=sl_from_web,
+            tp_override=tp_from_web,
+            trade_id=trade_id
+        )
+
+    if executed_qty > 0:
+        update_last_trade(symbol, side)
+
+    return executed_qty, entry_price
+
+# --- LAST TRADE SHOWING ---
+def update_last_trade(symbol: str, side: str):
+    global LAST_TRADE
+
+    LAST_TRADE = {
+        "symbol": symbol,
+        "side": side,
+        "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    }
 
 
 # ====== SL/TP FUNCTIONS ======
@@ -856,9 +1039,12 @@ MILESTONES_USDC = [500, 1000, 2000, 5000, 10000, 25000, 50000]
 REACHED_MILESTONES = set()
 
 def check_milestones(total_balance_usdc: float):
+    new_milestones = []
+
     for milestone in MILESTONES_USDC:
         if total_balance_usdc >= milestone and milestone not in REACHED_MILESTONES:
             REACHED_MILESTONES.add(milestone)
+            new_milestones.append(milestone)
 
             logger.info(
                 f"🎉🎉 CONGRATS! 🎉🎉\n"
@@ -866,6 +1052,19 @@ def check_milestones(total_balance_usdc: float):
                 f"🚀 Keep it up. Compounding is working.\n"
                 f"🔥 Discipline > Luck\n"
             )
+
+    return new_milestones
+
+
+# ====== CENSORING KEYS ======
+SENSITIVE_FIELDS = {"admin_key", "trading_key"}
+
+def sanitize_payload(payload: dict) -> dict:
+    clean = payload.copy()
+    for field in SENSITIVE_FIELDS:
+        if field in clean:
+            clean[field] = "***REDACTED***"
+    return clean
 
 
 # ====== ADMIN FUNCTIONS ======
@@ -892,6 +1091,12 @@ def clear(symbol=None):
             continue
 
         try:
+            get_symbol_lot(asset_symbol)
+        except:
+            logger.warning(f"⚠️ No USDC pair for {asset_name}, skipping")
+            continue
+
+        try:
             logger.admin(f"↪ Clearing {free_qty} {asset_name}")
             handle_pre_trade_cleanup(asset_symbol)
             cleared_symbols.append(asset_symbol)
@@ -905,77 +1110,41 @@ def clear(symbol=None):
 
 def read():
     logger.admin("📊 Reading Cross Margin account snapshot...")
-    acc = get_margin_account()
-    total_debt = 0.0
-    usdc_balance = 0.0
-    usdc_borrowed = 0.0
-    assets_with_balance = []
-
-    for asset in acc["userAssets"]:
-
-        borrowed = float(asset["borrowed"])
-        free = float(asset["free"])
-        locked = float(asset["locked"])
-
-        total_debt += borrowed
-
-        total_asset_balance = free + locked
-
-        if total_asset_balance > 0 and asset["asset"] != "USDC":
-            assets_with_balance.append({
-                "asset": asset["asset"],
-                "balance": round(total_asset_balance, 8)
-            })
-
-        if asset["asset"] == "USDC":
-            usdc_balance = total_asset_balance
-            usdc_borrowed = borrowed
-
-    btc_usdc_price = get_btc_usdc_price()
-    total_balance_usdc = float(acc["totalNetAssetOfBtc"]) * btc_usdc_price
-    margin_level = float(acc["marginLevel"])
+    snapshot = build_snapshot()
     logger.admin("────────── 📊 ACCOUNT VARIABLES 📊 ──────────")
     logger.admin(f"├─ 🤖 Trading              : {TRADING}")
     logger.admin(f"├─ 🧪 Testnet Mode         : {TESTNET}")
     logger.admin(f"├─ 🟥 Stop Loss Override   : {SL_OVERRIDE}")
     logger.admin(f"├─ 🟩 Take Profit Override : {TP_OVERRIDE}")
-    logger.admin(f"├─ 🔴 Stop Loss Value      : {SL_PCT}")
-    logger.admin(f"├─ 🟢 Take Profit Value    : {TP_PCT}")
+    logger.admin(f"├─ 🔴 Stop Loss Value      : {SL_PCT} %")
+    logger.admin(f"├─ 🟢 Take Profit Value    : {TP_PCT} %")
     logger.admin(f"├─ 🔄 Retries Value        : {RETRIES}")
+    logger.admin(f"├─ 📸 Snapshot Interval    : Every {SNAPSHOT_INTERVAL} day(s)")
     logger.admin("__________ 📊 TRADING STATUS 📊 ──────────")
-    logger.admin(f"├─ 📢 Last Trade ID        : {TRADE_COUNTER}")
-    logger.admin(f"├─ 📈 Longs Today          : {DAILY_LONGS}")
-    logger.admin(f"├─ 📉 Shorts Today         : {DAILY_SHORTS}")
+    logger.admin(f"├─ 📢 Last Trade ID        : Trade No. {snapshot['tradeId']}")
+    logger.admin(f"├─ 📈 Longs Today          : {snapshot['longsToday']}")
+    logger.admin(f"├─ 📉 Shorts Today         : {snapshot['shortsToday']}")
+    logger.admin(f"├─ 📈 Total Longs          : {snapshot['totalLongs']}")
+    logger.admin(f"├─ 📉 Total Shorts         : {snapshot['totalShorts']}")
+    logger.admin(f"├─ ⌚ Last Trade           : {LAST_TRADE}")
     logger.admin("────────── 📊 ACCOUNT SNAPSHOT 📊 ──────────")
-    logger.admin(f"├─ 💰 Total Balance (USDC) : {total_balance_usdc:.8f}")
-    logger.admin(f"├─ 💵 USDC Balance         : {usdc_balance:.8f}")
-    logger.admin(f"├─ 💳 USDC Borrowed        : {usdc_borrowed:.8f}")
-    logger.admin(f"├─ 💸 Total Debt           : {total_debt:.8f}")
-    logger.admin(f"├─ ⚖️ Margin Level         : {margin_level}")
-    logger.admin(f"├─ 🧾 Assets with balance:")
-    for a in assets_with_balance:
-        logger.admin(f"│   ├─ {a['asset']} : {a['balance']}")
-    logger.admin("──────────────────────────────────────────────")
-    snapshot = {
-        "TRADING": TRADING,
-        "TESTNET": TESTNET,
-        "SL_OVERRIDE": SL_OVERRIDE,
-        "TP_OVERRIDE": TP_OVERRIDE,
-        "SL": SL_PCT,
-        "TP": TP_PCT,
-        "RETRIES": RETRIES,
-        "lastTradeID": TRADE_COUNTER,
-        "longsToday": DAILY_LONGS,
-        "shortsToday": DAILY_SHORTS,
-        "totalBalanceUSDC": round(total_balance_usdc, 8),
-        "usdcBalance": round(usdc_balance, 8),
-        "usdcBorrowed": round(usdc_borrowed, 8),
-        "totalDebt": round(total_debt, 8),
-        "marginLevel": float(acc["marginLevel"]),
-        "assetsWithBalance": assets_with_balance
-    }
+    logger.admin(f"├─ 💰 Total Balance (USDC) : {snapshot['totalBalanceUSDC']:.8f} $")
+    logger.admin(f"├─ 💵 USDC Balance         : {snapshot['usdcBalance']:.8f} $")
+    logger.admin(f"├─ 💳 USDC Borrowed        : {snapshot['usdcBorrowed']:.8f} $")
+    logger.admin(f"├─ 💸 Total Debt           : {snapshot['totalDebt']:.8f} $")
+    logger.admin(f"├─ ⚖️ Margin Level         : {snapshot['marginLevel']}")
 
-    check_milestones(total_balance_usdc)
+    if snapshot["totalDebt"] == 0 and snapshot["marginLevel"] == 999.00:
+        logger.admin("├─ ✅ No debt")
+
+    logger.admin(f"├─ 🧾 Assets with balance:")
+    for a in snapshot['assetsWithBalance']:
+        logger.admin(f"│   ├─ {a['asset']} : {a['balance']}")
+
+    logger.admin("──────────────────────────────────────────────")
+
+    milestones = check_milestones(snapshot["totalBalanceUSDC"])
+    snapshot["milestonesReached"] = milestones
     return snapshot
 
 def borrow(amount: float):
@@ -1125,17 +1294,34 @@ def set_retries(value=None):
 
     return {"status": "error", "msg": "no state or value provided"}
 
+def set_log_view(value=None):
+    global LOG_VIEW
+
+    if value is not None:
+
+        try:
+            value = int(value)
+        except:
+            return {"status": "error", "msg": "invalid LOG_VIEW value"}
+
+        LOG_VIEW = max(0, min(value, 80))
+        logger.admin(f"🛠️ ADMIN ACTION: LOG_VIEW value updated → {LOG_VIEW}")
+        return {"status": "ok", "log_view_value": LOG_VIEW}
+
+    return {"status": "error", "msg": "no state or value provided"}
+
 def restore():
-    global RETRIES, SL_PCT, TP_PCT, TRADING, TESTNET, SL_OVERRIDE, TP_OVERRIDE
+    global RETRIES, SL_PCT, TP_PCT, TRADING, TESTNET, SL_OVERRIDE, TP_OVERRIDE, LOG_VIEW
 
     logger.admin("🛠️ ADMIN ACTION: RESTORE default trading parameters")
-    RETRIES = DEFAULT_RETRIES
-    SL_PCT = DEFAULT_SL_PCT
-    TP_PCT = DEFAULT_TP_PCT
-    TRADING = DEFAULT_TRADING
-    TESTNET = DEFAULT_TESTNET
-    SL_OVERRIDE = DEFAULT_SL_OVERRIDE
-    TP_OVERRIDE = DEFAULT_TP_OVERRIDE
+    RETRIES = DFT_RETRIES
+    SL_PCT = DFT_SL_PCT
+    TP_PCT = DFT_TP_PCT
+    TRADING = DFT_TRADING
+    TESTNET = DFT_TESTNET
+    SL_OVERRIDE = DFT_SL_OVERRIDE
+    TP_OVERRIDE = DFT_TP_OVERRIDE
+    LOG_VIEW = DFT_LOG_VIEW
     logger.admin(f"🔄 RETRIES restored → {RETRIES}")
     logger.admin(f"🔄 SL_PCT restored → {SL_PCT}")
     logger.admin(f"🔄 TP_PCT restored → {TP_PCT}")
@@ -1143,29 +1329,9 @@ def restore():
     logger.admin(f"🔄 TESTNET restored → {TESTNET}")
     logger.admin(f"🔄 SL_OVERRIDE restored → {SL_OVERRIDE}")
     logger.admin(f"🔄 TP_OVERRIDE restored → {TP_OVERRIDE}")
-    return {"status": "ok", "RETRIES": RETRIES, "SL_PCT": SL_PCT, "TP_PCT": TP_PCT, "TRADING": TRADING, "TESTNET": TESTNET, "SL_OVERRIDE": SL_OVERRIDE, "TP_OVERRIDE": TP_OVERRIDE}
+    logger.admin(f"🔄 LOG_VIEW restored → {LOG_VIEW}")
+    return {"status": "ok", "RETRIES": RETRIES, "SL_PCT": SL_PCT, "TP_PCT": TP_PCT, "TRADING": TRADING, "TESTNET": TESTNET, "SL_OVERRIDE": SL_OVERRIDE, "TP_OVERRIDE": TP_OVERRIDE, "LOG_VIEW": LOG_VIEW}
 
-def log_url():
-    url = request.host_url.rstrip("/")
-    params = urlencode({"key": LOG_KEY})
-    log_url = f"{url}/logs?{params}"
-    logger.admin(f"🌐 LOG LIST URL:")
-    logger.admin(f"{log_url}")
-    return {"log_download_url": log_url}
-
-def logout(ip):
-    destroy_admin_session(ip)
-    return {"status": "logged_out"}
-
-def get_btc_usdc_price():
-    r = requests.get(f"{BASE_URL}/api/v3/ticker/price", params={"symbol": "BTCUSDC"}, timeout=5)
-    return float(r.json()["price"])
-
-def get_margin_account():
-    logger.info("📊 Fetching margin account info...")
-    params = {}
-    acc = send_signed_request("GET", "/sapi/v1/margin/account", params)
-    return acc
 
 # ====== ADMIN ACTIONS ======
 ADMIN_ACTIONS = {
@@ -1179,35 +1345,20 @@ ADMIN_ACTIONS = {
     "TP": set_tp,
     "RETRIES": set_retries,
     "RESTORE": restore,
-    "LOG_URL": log_url,
-    "LOGOUT": logout
+    "LOG_VIEW": set_log_view,
 }
 
 
-# ====== ADMIN SESSION SYSTEM ======
+# ====== ADMIN SYSTEM ======
+# --- ADMIN PLACEHOLDERS ---
 ADMIN_SESSIONS = {}
-ADMIN_SESSION_TIMEOUT = 300
+LOGIN_ATTEMPTS = {}
 
-def get_client_ip():
+# --- ADMIN SESSIONS ---
+def get_ip():
     if request.headers.get("X-Forwarded-For"):
         return request.headers.get("X-Forwarded-For").split(",")[0].strip()
     return request.remote_addr
-
-def admin_session_active(ip):
-    now = time.time()
-
-    if ip not in ADMIN_SESSIONS:
-        return False
-
-    last_seen = ADMIN_SESSIONS[ip]
-
-    if now - last_seen > ADMIN_SESSION_TIMEOUT:
-        logger.admin(f"🔒 Admin session expired for {ip}")
-        del ADMIN_SESSIONS[ip]
-        return False
-
-    ADMIN_SESSIONS[ip] = now
-    return True
 
 def create_admin_session(ip):
     ADMIN_SESSIONS[ip] = time.time()
@@ -1218,13 +1369,42 @@ def destroy_admin_session(ip):
         del ADMIN_SESSIONS[ip]
         logger.admin(f"🔒 Admin session closed for {ip}")
 
-def require_admin():
-    client_ip = get_client_ip()
-    if not admin_session_active(client_ip):
-        logger.error(f"🚫 Unauthorized admin access from {client_ip}")
-        return None
+def is_admin_authenticated():
+    ip = get_ip()
 
-    return client_ip
+    if ip not in ADMIN_SESSIONS:
+        return False
+
+    last_activity = ADMIN_SESSIONS[ip]
+
+    if time.time() - last_activity > (ADMIN_TIMEOUT * 60):
+        logger.admin(f"🔒 Admin session expired for {ip}")
+        del ADMIN_SESSIONS[ip]
+        return False
+
+    ADMIN_SESSIONS[ip] = time.time()
+    return True
+
+def handle_unauthorized():
+    if "text/html" in request.headers.get("Accept", ""):
+        return redirect(url_for("login"))
+    else:
+        return jsonify({"error": "unauthorized"}), 403
+
+# --- LOGIN ATTEMPTS ---
+def is_rate_limited(ip):
+    now = time.time()
+    attempts = LOGIN_ATTEMPTS.get(ip, [])
+
+    attempts = [t for t in attempts if now - t < (LOGIN_WINDOW * 60)]
+    attempts.append(now)
+    LOGIN_ATTEMPTS[ip] = attempts
+
+    return len(attempts) > MAX_LOGIN_ATTEMPTS
+
+def reset_login_attempts(ip):
+    if ip in LOGIN_ATTEMPTS:
+        del LOGIN_ATTEMPTS[ip]
 
 
 # ====== FLASK WEBHOOK ======
@@ -1238,9 +1418,7 @@ def webhook():
     if not data:
         return jsonify({"error": "Empty payload"}), 400
 
-    check_daily_summary()
     logger.info(f"📩 Webhook received: {sanitize_payload(data)}")
-
     allowed, response = trading_guard()
 
     if not allowed:
@@ -1255,67 +1433,185 @@ def webhook():
             logger.error("🚫 Invalid or missing trading_key")
             return jsonify({"status": "blocked", "reason": "invalid trading key"}), 403
 
+    executor.submit(process_trade, data)
+    return jsonify({"status": "ok", "result": "accepted"}), 200
+
+def process_trade(data):
     symbol = data["symbol"]
     side = data["side"].upper()
     start = time.time()
-    with TRADE_LOCK:
 
-        logger.info("🔒 TRADE LOCK ACQUIRED")
-
-        if not check_margin_level():
-            logger.warning("⛔ Trading blocked by margin safety system (critical)")
-            return jsonify({"status": "blocked", "reason": "margin critical"}), 200
-
-        if TRADING_BLOCKED:
-            logger.admin("⛔ Trading blocked by margin safety system")
-            return jsonify({"status": "blocked", "reason": "margin protection"}), 200
-
-        handle_pre_trade_cleanup(symbol)
-        check_margin_level()
-
-        if TRADING_BLOCKED:
-            logger.admin("⛔ Trading blocked due to margin protection")
-            return jsonify({"status": "blocked_by_margin"}), 200
-
-        if side == "BUY":
-            resp = execute_long_margin(symbol, webhook_data=data)
-            trade_id = resp.get("trade_id")
-        elif side == "SELL":
-            resp = execute_short_margin(symbol, webhook_data=data)
-            trade_id = resp.get("trade_id")
-        else:
-            return jsonify({"error": "Invalid side"}), 400
-
-        latency = time.time() - start
-        logger.info(f"[TRADE {trade_id}] ⏳ Trade execution latency: {latency:.2f}s")
-        logger.info(f"[TRADE {trade_id}] 🔓 TRADE LOCK RELEASED")
-
-    return jsonify({"status": "ok", "result": resp}), 200
-
-
-@app.route("/login", methods=["POST"])
-def admin_login():
     try:
-        data = request.get_json(force=True)
-    except:
-        return jsonify({"error": "Invalid JSON"}), 400
+        with TRADE_LOCK:
 
-    if not data:
-        return jsonify({"error": "Empty payload"}), 400
+            logger.info("🔒 TRADE LOCK ACQUIRED")
 
-    if data.get("admin_key") != ADMIN_KEY:
-        logger.error("🚫 Invalid admin key")
-        return jsonify({"error": "invalid key"}), 403
+            if not check_margin_level():
+                logger.admin("⛔ Trading blocked (critical margin condition)")
+                return
 
-    client_ip = get_client_ip()
-    create_admin_session(client_ip)
-    return jsonify({"status": "admin_session_started"}), 200
+            if TRADING_BLOCKED:
+                logger.admin("⛔ Trading blocked by margin safety system")
+                return
+
+            handle_pre_trade_cleanup(symbol)
+
+            if side == "BUY":
+                resp = execute_long_margin(symbol, webhook_data=data)
+                trade_id = resp.get("trade_id") if resp else "UNKNOWN"
+            elif side == "SELL":
+                resp = execute_short_margin(symbol, webhook_data=data)
+                trade_id = resp.get("trade_id") if resp else "UNKNOWN"
+            else:
+                logger.error("⛔ Trading blocked due to invalid side")
+                return
+
+            latency = time.time() - start
+            logger.info(f"[TRADE {trade_id}] ⏳ Trade execution latency: {latency:.2f}s")
+            logger.info(f"[TRADE {trade_id}] 🔓 TRADE LOCK RELEASED")
+    except Exception as e:
+        logger.error(f"🔥 CRITICAL TRADE ERROR: {e}", exc_info=True)
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    error = None
+
+    if request.method == "POST":
+
+        ip = get_ip()
+        now = time.time()
+
+        attempts = LOGIN_ATTEMPTS.get(ip, [])
+        attempts = [t for t in attempts if now - t < (LOGIN_WINDOW * 60)]
+        LOGIN_ATTEMPTS[ip] = attempts
+
+        if len(attempts) >= MAX_LOGIN_ATTEMPTS:
+            retry_after = int((LOGIN_WINDOW * 60) - (now - attempts[0]))
+
+            if request.is_json:
+                return jsonify({
+                    "error": "Too many login attempts",
+                    "retry_after": retry_after
+                }), 429
+            else:
+                error = f"Too many attempts. Try again in {retry_after}s."
+                return render_template_string(html, error=error)
+
+        if request.is_json:
+            data = request.get_json()
+            admin_key = data.get("admin_key")
+        else:
+            admin_key = request.form.get("admin_key")
+
+        if admin_key == ADMIN_KEY:
+            create_admin_session(ip)
+            reset_login_attempts(ip)
+
+            if request.is_json:
+                return jsonify({"status": "authorized"}), 200
+
+            return redirect(url_for("dashboard"))
+
+        else:
+            attempts.append(now)
+            LOGIN_ATTEMPTS[ip] = attempts
+
+            if request.is_json:
+                return jsonify({"error": "Invalid admin key"}), 401
+
+            error = "Invalid admin key"
+
+    html = """
+    <html>
+    <head>
+        <title>SGNT Login</title>
+        <link rel="icon" type="image/png" href="/static/sgnticon.png">
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
+        <style>
+            body {
+                background: linear-gradient(135deg, #0f172a, #020617);
+                color: white;
+                font-family: 'Inter', sans-serif;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                height: 100vh;
+                margin: 0;
+            }
+
+            .login-box {
+                background: #1e293b;
+                padding: 40px;
+                border-radius: 15px;
+                box-shadow: 0 0 40px rgba(0,0,0,0.6);
+                width: 300px;
+                text-align: center;
+            }
+
+            h1 {
+                margin-bottom: 20px;
+                font-weight: 600;
+            }
+
+            input {
+                width: 100%;
+                padding: 12px;
+                margin-top: 10px;
+                border-radius: 8px;
+                border: none;
+                background: #0f172a;
+                color: white;
+            }
+
+            button {
+                margin-top: 20px;
+                width: 100%;
+                padding: 12px;
+                border: none;
+                border-radius: 8px;
+                background: #3b82f6;
+                color: white;
+                font-weight: 600;
+                cursor: pointer;
+            }
+
+            button:hover {
+                background: #2563eb;
+            }
+
+            .error {
+                color: #ef4444;
+                margin-top: 10px;
+                font-size: 14px;
+            }
+        </style>
+    </head>
+    <body>
+
+        <form method="POST" class="login-box">
+            <h1>🔐 SGNT</h1>
+
+            <input type="password" name="admin_key" placeholder="Enter Admin Key" required>
+
+            <button type="submit">Login</button>
+
+            {% if error %}
+                <div class="error">{{ error }}</div>
+            {% endif %}
+        </form>
+
+    </body>
+    </html>
+    """
+
+    return render_template_string(html, error=error)
 
 
 @app.route("/clear", methods=["GET"])
 def admin_clear():
-    if not require_admin():
-        return jsonify({"error": "admin_auth_required"}), 403
+    if not is_admin_authenticated():
+        return handle_unauthorized()
 
     symbol = request.args.get("symbol")
     result = clear(symbol)
@@ -1324,8 +1620,8 @@ def admin_clear():
 
 @app.route("/read", methods=["GET"])
 def admin_read():
-    if not require_admin():
-        return jsonify({"error": "admin_auth_required"}), 403
+    if not is_admin_authenticated():
+        return handle_unauthorized()
 
     snapshot = read()
     return jsonify(snapshot), 200
@@ -1333,34 +1629,51 @@ def admin_read():
 
 @app.route("/borrow", methods=["GET"])
 def admin_borrow():
-    if not require_admin():
-        return jsonify({"error": "admin_auth_required"}), 403
+    if not is_admin_authenticated():
+        return handle_unauthorized()
+
     try:
         amount = float(request.args.get("amount", 0))
     except:
         return jsonify ({"error": "Invalid amount"}), 400
 
-    result = borrow(amount)
-    return jsonify({"status": "ok", "amount": amount, "result": result}), 200
+    try:
+        result = borrow(amount)
+        return jsonify({"amount": amount, "result": result}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/repay", methods=["GET"])
 def admin_repay():
-    if not require_admin():
-        return jsonify({"error": "admin_auth_required"}), 403
-    try:
-        amount = float(request.args.get("amount", 0))
-    except:
-        return jsonify ({"error": "Invalid amount"}), 400
+    if not is_admin_authenticated():
+        return handle_unauthorized()
 
-    result = repay(amount)
-    return jsonify({"status": "ok", "amount": amount, "result": result}), 200
+    amount_param = request.args.get("amount", "0")
+
+    if amount_param.lower() == "all":
+        amount = "all"
+    else:
+        try:
+            amount = float(amount_param)
+        except:
+            return jsonify({"error": "Invalid amount"}), 400
+
+    try:
+        result = repay(amount)
+        return jsonify({"amount": amount, "result": result}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/trading", methods=["GET"])
 def admin_trading():
-    if not require_admin():
-        return jsonify({"error": "admin_auth_required"}), 403
+    if not is_admin_authenticated():
+        return handle_unauthorized()
 
     state = request.args.get("state", "").lower()
     result = set_trading_state(state)
@@ -1369,8 +1682,8 @@ def admin_trading():
 
 @app.route("/testnet", methods=["GET"])
 def admin_testnet():
-    if not require_admin():
-        return jsonify({"error": "admin_auth_required"}), 403
+    if not is_admin_authenticated():
+        return handle_unauthorized()
 
     state = request.args.get("state", "").lower()
     result = set_testnet_state(state)
@@ -1379,8 +1692,8 @@ def admin_testnet():
 
 @app.route("/sl", methods=["GET"])
 def admin_sl():
-    if not require_admin():
-        return jsonify({"error": "admin_auth_required"}), 403
+    if not is_admin_authenticated():
+        return handle_unauthorized()
 
     state = request.args.get("state")
     value = request.args.get("value")
@@ -1390,8 +1703,8 @@ def admin_sl():
 
 @app.route("/tp", methods=["GET"])
 def admin_tp():
-    if not require_admin():
-        return jsonify({"error": "admin_auth_required"}), 403
+    if not is_admin_authenticated():
+        return handle_unauthorized()
 
     state = request.args.get("state")
     value = request.args.get("value")
@@ -1401,40 +1714,41 @@ def admin_tp():
 
 @app.route("/retries", methods=["GET"])
 def admin_retries():
-    if not require_admin():
-        return jsonify({"error": "admin_auth_required"}), 403
+    if not is_admin_authenticated():
+        return handle_unauthorized()
 
     value = request.args.get("value")
     result = set_retries(value)
     return jsonify(result), 200
 
 
+@app.route("/log_view", methods=["GET"])
+def admin_log_view():
+    if not is_admin_authenticated():
+        return handle_unauthorized()
+
+    value = request.args.get("value")
+    result = set_log_view(value)
+    return jsonify(result), 200
+
+
 @app.route("/restore", methods=["GET"])
 def admin_restore():
-    if not require_admin():
-        return jsonify({"error": "admin_auth_required"}), 403
+    if not is_admin_authenticated():
+        return handle_unauthorized()
 
     result = restore()
     return jsonify(result), 200
 
 
-@app.route("/log_url", methods=["GET"])
-def admin_log_url():
-    if not require_admin():
-        return jsonify({"error": "admin_auth_required"}), 403
-
-    result = log_url()
-    return jsonify(result), 200
-
-
 @app.route("/logout", methods=["GET"])
 def admin_logout():
-    client_ip = require_admin()
+    ip = get_ip()
 
-    if not client_ip:
+    if not ip:
         return jsonify({"error": "admin_auth_required"}), 403
 
-    destroy_admin_session(client_ip)
+    destroy_admin_session(ip)
     return jsonify({"status": "logged_out"}), 200
 
 
@@ -1444,19 +1758,67 @@ def health():
     return jsonify({"bot_ready": BOT_READY, "trading": TRADING, "uptime_seconds": uptime, "mode": "TESTNET" if TESTNET else "LIVE"})
 
 
+@app.route("/dashboard")
+def dashboard():
+    if not is_admin_authenticated():
+        return handle_unauthorized()
+
+    html = """
+    <html>
+    <head>
+        <title>SGNT Dashboard</title>
+        <link rel="icon" type="image/png" href="/static/sgnticon.png">
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
+        <style>
+            body {
+                background-color: #0f172a;
+                color: white;
+                font-family: 'Inter', sans-serif;
+                text-align: center;
+            }
+            .container {
+                margin-top: 100px;
+            }
+            button {
+                padding: 15px 30px;
+                margin: 20px;
+                font-size: 18px;
+                background: #3b82f6;
+                border: none;
+                color: white;
+                border-radius: 10px;
+                cursor: pointer;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>📊 SGNT Control Panel</h1>
+
+            <a href="/metrics">
+                <button>📈 Metrics</button>
+            </a>
+
+            <a href="/logs">
+                <button>🧾 Logs</button>
+            </a>
+        </div>
+    </body>
+    </html>
+    """
+    return html
+
+
 @app.route("/logs")
 def logs():
-    key = request.args.get("key")
-    if key != LOG_KEY:
-        return {"error": "unauthorized"}, 403
+    if not is_admin_authenticated():
+        return handle_unauthorized()
 
     filename = request.args.get("file")
     level = request.args.get("level")
     download_all = request.args.get("download")
 
-    # 📦 DOWNLOAD ALL LOGS AS ZIP
     if download_all == "all":
-
         memory_file = io.BytesIO()
 
         with zipfile.ZipFile(memory_file, "w") as zf:
@@ -1473,26 +1835,19 @@ def logs():
             mimetype="application/zip"
         )
 
-    # 📥 LOG DOWNLOAD
     if filename:
+        if not filename.endswith(".log"):
+            return {"error": "invalid file type"}, 400
 
-        if not os.path.exists(filename):
+        if not os.path.isfile(filename):
             return {"error": "file not found"}, 404
 
-        # 🔎 FILTER BY LABEL
         if level:
-
-            filtered_lines = []
-
             with open(filename, "r", encoding="utf-8") as f:
-                for line in f:
-                    if level in line:
-                        filtered_lines.append(line)
-
-            filtered_content = "".join(filtered_lines)
+                filtered_lines = (line for line in f if level in line)
 
             return Response(
-                filtered_content,
+                "".join(filtered_lines),
                 mimetype="text/plain",
                 headers={
                     "Content-Disposition":
@@ -1500,98 +1855,343 @@ def logs():
                 }
             )
 
-        # 📥 NORMAL DOWNLOAD
         return send_file(
             filename,
             as_attachment=True,
             mimetype="text/plain"
         )
 
-    # 🧾 LOG LISTING
+
     log_files = []
 
     for f in os.listdir("."):
         if f.endswith(".log") and os.path.isfile(f):
-
             size_mb = os.path.getsize(f) / (1024 * 1024)
             modified = os.path.getmtime(f)
 
             log_files.append({
                 "name": f,
-                "size_mb": f"{size_mb:.2f} MB",
+                "size": f"{size_mb:.2f} MB",
                 "modified": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(modified))
             })
 
     log_files.sort(key=lambda x: x["modified"], reverse=True)
 
+    latest_logs = []
+    if log_files:
+        latest_file = log_files[0]["name"]
+
+        with open(latest_file, "r", encoding="utf-8") as f:
+            if LOG_VIEW == 0:
+                latest_logs = []
+            else:
+                latest_logs = list(deque(f, maxlen=LOG_VIEW))
+
     html = """
     <html>
     <head>
         <title>SGNT Logs</title>
+        <link rel="icon" type="image/png" href="/static/sgnticon.png">
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
+        <style>
+            body {
+                background-color: #0f172a;
+                color: white;
+                font-family: 'Inter', sans-serif;
+                padding: 20px;
+            }
+
+            table {
+                width: 100%;
+                border-collapse: collapse;
+                margin-top: 30px;
+            }
+
+            th, td {
+                border: 1px solid #334155;
+                padding: 8px;
+                text-align: center;
+            }
+
+            th {
+                background-color: #1e293b;
+            }
+
+            button {
+                padding: 5px 10px;
+                margin: 2px;
+                border: none;
+                border-radius: 5px;
+                cursor: pointer;
+            }
+
+            .download { background: #3b82f6; color: white; }
+            .info { background: #22c55e; }
+            .warning { background: #eab308; }
+            .error { background: #ef4444; }
+            .admin { background: #8b5cf6; }
+            .date { background: #06b6d4; }
+
+            pre {
+                background: #1e293b;
+                padding: 15px;
+                border-radius: 10px;
+                max-height: 400px;
+                overflow-y: scroll;
+            }
+        </style>
     </head>
     <body>
 
-        <h2>Log list</h2>
+    <h1>🧾 SGNT Logs</h1>
 
-        <p>
-            <a href="/logs?download=all&key={{ key }}">
-                <button>Download ALL logs (ZIP)</button>
-            </a>
-        </p>
+    <a href="/logs?download=all">
+        <button class="download">📦 Download ALL logs</button>
+    </a>
 
-        <table border="1" cellpadding="6">
-            <tr>
-                <th>File</th>
-                <th>Size</th>
-                <th>Last modification</th>
-                <th>Download</th>
-                <th>Filters</th>
-            </tr>
+    <h2>🔥 Latest Log Preview (last {{ preview_size }} lines)</h2>
+    <pre>
+{% for line in preview %}
+{{ line }}
+{% endfor %}
+    </pre>
 
-            {% for log in logs %}
+    <h2>📁 Log Files</h2>
 
-            <tr>
-                <td>{{ log.name }}</td>
-                <td>{{ log.size_mb }}</td>
-                <td>{{ log.modified }}</td>
+    <table>
+        <tr>
+            <th>File</th>
+            <th>Size</th>
+            <th>Modified</th>
+            <th>Download</th>
+            <th>Filters</th>
+        </tr>
 
-                <td>
-                    <a href="/logs?file={{ log.name }}&key={{ key }}">
-                        <button>Download</button>
-                    </a>
-                </td>
+        {% for log in logs %}
+        <tr>
+            <td>{{ log.name }}</td>
+            <td>{{ log.size }}</td>
+            <td>{{ log.modified }}</td>
 
-                <td>
+            <td>
+                <a href="/logs?file={{ log.name }}">
+                    <button class="download">Download</button>
+                </a>
+            </td>
 
-                    <a href="/logs?file={{ log.name }}&level=INFO&key={{ key }}">
-                        <button>INFO</button>
-                    </a>
+            <td>
+                <a href="/logs?file={{ log.name }}&level=INFO">
+                    <button class="info">INFO</button>
+                </a>
 
-                    <a href="/logs?file={{ log.name }}&level=WARNING&key={{ key }}">
-                        <button>WARNING</button>
-                    </a>
+                <a href="/logs?file={{ log.name }}&level=WARNING">
+                    <button class="warning">WARNING</button>
+                </a>
 
-                    <a href="/logs?file={{ log.name }}&level=ERROR&key={{ key }}">
-                        <button>ERROR</button>
-                    </a>
+                <a href="/logs?file={{ log.name }}&level=ERROR">
+                    <button class="error">ERROR</button>
+                </a>
 
-                    <a href="/logs?file={{ log.name }}&level=ADMIN&key={{ key }}">
-                        <button>ADMIN</button>
-                    </a>
+                <a href="/logs?file={{ log.name }}&level=ADMIN">
+                    <button class="admin">ADMIN</button>
+                </a>
 
-                </td>
+                <a href="/logs?file={{ log.name }}&level=DATE">
+                    <button class="date">DATE</button>
+                </a>
 
-            </tr>
+            </td>
+        </tr>
+        {% endfor %}
 
-            {% endfor %}
-
-        </table>
+    </table>
 
     </body>
     </html>
     """
 
-    return render_template_string(html, logs=log_files, key=LOG_KEY)
+    return render_template_string(html, logs=log_files, preview=latest_logs, preview_size=LOG_VIEW)
+
+
+@app.route("/metrics")
+def metrics():
+    if not is_admin_authenticated():
+        return handle_unauthorized()
+
+    if not SNAPSHOT_HISTORY:
+        return "No data yet"
+
+    return f"""
+    <html>
+    <head>
+        <title>SGNT Metrics</title>
+        <link rel="icon" type="image/png" href="/static/sgnticon.png">
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+        <style>
+            body {{
+                background-color: #0f172a;
+                color: white;
+                font-family: 'Inter', sans-serif;
+            }}
+            canvas {{
+                background: #1e293b;
+                border-radius: 10px;
+                padding: 10px;
+                margin-bottom: 10px;
+            }}
+            button {{
+                margin-bottom: 30px;
+                margin-right: 10px;
+                padding: 8px 12px;
+                border: none;
+                border-radius: 6px;
+                background: #2563eb;
+                color: white;
+                cursor: pointer;
+            }}
+            button:hover {{
+                background: #1d4ed8;
+            }}
+        </style>
+    </head>
+    <body>
+
+    <h1>📊 Trading Dashboard</h1>
+
+    <canvas id="balanceChart"></canvas>
+    <button onclick="downloadChart('balanceChart')">Download Balance</button>
+
+    <canvas id="marginChart"></canvas>
+    <button onclick="downloadChart('marginChart')">Download Margin</button>
+
+    <canvas id="activityChart"></canvas>
+    <button onclick="downloadChart('activityChart')">Download Activity</button>
+
+    <script>
+    const data = {SNAPSHOT_HISTORY};
+    const SNAPSHOT_INTERVAL = {SNAPSHOT_INTERVAL};
+    const labels = data.map(d => d.time);
+
+    function dataset(label, key, color) {{
+        return {{
+            label: label,
+            data: data.map(d => d[key]),
+            borderColor: color,
+            tension: 0.2
+        }};
+    }}
+
+    function downloadChart(chartId) {{
+        const canvas = document.getElementById(chartId);
+        const link = document.createElement('a');
+        link.download = chartId + '.png';
+        link.href = canvas.toDataURL('image/png');
+        link.click();
+    }}
+
+    const balanceChart = new Chart(document.getElementById('balanceChart'), {{
+        type: 'line',
+        data: {{
+            labels,
+            datasets: [
+                dataset("Total Balance", "totalBalanceUSDC", "cyan"),
+                dataset("USDC Balance", "usdcBalance", "green"),
+                dataset("Debt", "totalDebt", "red"),
+                dataset("Borrowed", "usdcBorrowed", "orange")
+            ]
+        }}
+    }});
+
+    const marginChart = new Chart(document.getElementById('marginChart'), {{
+        type: 'line',
+        data: {{
+            labels,
+            datasets: [dataset("Margin Level", "marginLevel", "purple")]
+        }},
+        options: {{
+            scales: {{
+                y: {{ min: 0, max: 1000 }}
+            }}
+        }}
+    }});
+
+    const activityDatasets = [];
+    
+    if (SNAPSHOT_INTERVAL === 1) {{
+        activityDatasets.push(
+            {{
+                type: 'bar',
+                label: 'Today Longs',
+                data: data.map(d => d.longsToday),
+                backgroundColor: 'rgba(34,197,94,0.6)',
+                stack: 'daily'
+            }},
+            {{
+                type: 'bar',
+                label: 'Today Shorts',
+                data: data.map(d => d.shortsToday),
+                backgroundColor: 'rgba(239,68,68,0.6)',
+                stack: 'daily'
+            }}
+        );
+    }}
+    
+    activityDatasets.push(
+        {{
+            type: 'line',
+            label: 'Total Longs',
+            data: data.map(d => d.totalLongs),
+            borderColor: 'green',
+            tension: 0.2,
+            yAxisID: 'y1'
+        }},
+        {{
+            type: 'line',
+            label: 'Total Shorts',
+            data: data.map(d => d.totalShorts),
+            borderColor: 'red',
+            tension: 0.2,
+            yAxisID: 'y1'
+        }},
+        {{
+            type: 'line',
+            label: 'Trades',
+            data: data.map(d => d.tradeID),
+            borderColor: 'white',
+            tension: 0.2,
+            yAxisID: 'y1'
+        }}
+    );
+    
+    const activityChart = new Chart(document.getElementById('activityChart'), {{
+        data: {{
+            labels,
+            datasets: activityDatasets
+        }},
+        options: {{
+            responsive: true,
+            scales: {{
+                y: {{
+                    beginAtZero: true,
+                    stacked: SNAPSHOT_INTERVAL === 1,
+                    title: {{ display: true, text: "Daily Activity" }}
+                }},
+                y1: {{
+                    beginAtZero: true,
+                    position: 'right',
+                    title: {{ display: true, text: "Total Metrics" }},
+                    grid: {{ drawOnChartArea: false }}
+                }}
+            }}
+        }}
+    }});
+
+    </script>
+
+    </body>
+    </html>
+    """
 
 
 # ====== FLASK EXECUTION ======
