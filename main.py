@@ -6,6 +6,8 @@
 #   ╚══════╝   ╚═════╝   ╚═╝  ╚═══╝     ╚═╝
 
 # ====== IMPORTS ======
+"""Standard library and third-party imports required for the application."""
+
 import os
 import io
 import time
@@ -20,7 +22,6 @@ import threading
 from collections import deque
 from datetime import datetime
 from threading import Lock, Thread
-from urllib.parse import urlencode
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from concurrent.futures import ThreadPoolExecutor
 from logging.handlers import TimedRotatingFileHandler
@@ -28,40 +29,54 @@ from flask import Flask, request, jsonify, redirect, url_for, send_file, render_
 
 
 # ====== SETTINGS ======
-TRADE_LOCK = threading.RLock()
+"""Flask app initialization, thread pool executor, and global print flush override."""
+
 print = functools.partial(print, flush=True)
 app = Flask(__name__)
 executor = ThreadPoolExecutor(max_workers=3)
 
 
 # ====== VARIABLES ======
+"""All runtime variables: defaults, booleans, environment-loaded values, static config, trade counters, and secrets."""
+
 # --- DEFAULT VARIABLES ---
-DFT_RETRIES = 3
-DFT_SL_PCT = 2.0
-DFT_TP_PCT = 4.0
 DFT_TRADING = True
 DFT_TESTNET = False
 DFT_SL_OVERRIDE = True
 DFT_TP_OVERRIDE = True
+DFT_SL_PCT = 2.0
+DFT_TP_PCT = 4.0
+DFT_RETRIES = 3
 DFT_LOG_VIEW = 50
+DFT_LOGIN_LIMIT = 5
+DFT_LOGIN_RETRY = 5
+DFT_SESSION_TIMEOUT = 5
+
+# --- BOOL VARIABLES ---
+TRADING = os.getenv("TRADING", "true").lower() == "true"
+TESTNET = os.getenv("TESTNET", "false").lower() == "true"
+SL_OVERRIDE = os.getenv("SL_OVERRIDE", "true").lower() == "true"
+TP_OVERRIDE = os.getenv("TP_OVERRIDE", "true").lower() == "true"
 
 # --- ENVIRONMENT VARIABLES ---
-LOG_VIEW = int(os.getenv("LOG_VIEW", "50"))                      # NUMBER
-RETRIES = int(os.getenv("RETRIES", "3"))                         # NUMBER
 SL_PCT = float(os.getenv("SL_PCT", "2"))                         # %
 TP_PCT = float(os.getenv("TP_PCT", "4"))                         # %
+RETRIES = int(os.getenv("RETRIES", "3"))                         # NUMBER
+LOG_VIEW = int(os.getenv("LOG_VIEW", "50"))                      # NUMBER
+LOGIN_LIMIT = int(os.getenv("LOGIN_LIMIT", "5"))                 # NUMBER
+LOGIN_RETRY = int(os.getenv("LOGIN_RETRY", "5"))                 # MINUTES
+SESSION_TIMEOUT = int(os.getenv("SESSION_TIMEOUT", "5"))         # MINUTES
+
+# --- STATIC VARIABLES ---
+COMMISSION = Decimal(os.getenv("COMMISSION", "0.1"))             # %
 MAX_RISK_PCT = float(os.getenv("MAX_RISK_PCT", "20"))            # %
 MAX_RISK_PCT = max(0.1, min(MAX_RISK_PCT, 20))                   # %
 DEFAULT_RISK_PCT = float(os.getenv("DEFAULT_RISK_PCT", "5"))     # %
 DEFAULT_RISK_PCT = max(0.1, min(DEFAULT_RISK_PCT, MAX_RISK_PCT)) # %
-COMMISSION = Decimal(os.getenv("COMMISSION", "0.1"))             # %
-MAX_SNAPSHOTS = int(os.getenv("MAX_SNAPSHOTS", "500"))           # NUMBER
-SNAPSHOT_INTERVAL = int(os.getenv("SNAPSHOT_INTERVAL", "1"))     # DAYS
 BOOT_PERIOD = int(os.getenv("BOOT_PERIOD", "1"))                 # MINUTES
 GRACE_PERIOD = int(os.getenv("GRACE_PERIOD", "2"))               # MINUTES
-ADMIN_TIMEOUT = int(os.getenv("ADMIN_TIMEOUT", "5"))             # MINUTES
-LOGIN_WINDOW = int(os.getenv("LOGIN_WINDOW", "5"))               # MINUTES
-MAX_LOGIN_ATTEMPTS = int(os.getenv("MAX_LOGIN_ATTEMPTS", "5"))   # NUMBER
+SNAPSHOT_INTERVAL = int(os.getenv("SNAPSHOT_INTERVAL", "1"))     # DAYS
+MAX_SNAPSHOTS = int(os.getenv("MAX_SNAPSHOTS", "500"))           # NUMBER
 PORT = int(os.getenv("PORT", "5000"))                            # NUMBER
 
 # --- TRADE COUNTER VARIABLES ---
@@ -73,12 +88,6 @@ TOTAL_SHORTS = 0
 CURRENT_DAY = datetime.utcnow().date()
 LAST_TRADE = None
 
-# --- BOOL VARIABLES ---
-TRADING = os.getenv("TRADING", "true").lower() == "true"
-TESTNET = os.getenv("TESTNET", "false").lower() == "true"
-SL_OVERRIDE = os.getenv("SL_OVERRIDE", "true").lower() == "true"
-TP_OVERRIDE = os.getenv("TP_OVERRIDE", "true").lower() == "true"
-
 # --- SECRET VARIABLES ---
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
@@ -89,6 +98,8 @@ ADMIN_KEY = os.getenv("ADMIN_KEY")
 
 
 # ====== LOGGING ======
+"""Logger setup with rotating file handler, console handler, custom ADMIN and DATE log levels."""
+
 logger = logging.getLogger("sgnt")
 logger.setLevel(logging.INFO)
 
@@ -131,6 +142,8 @@ logging.Logger.date = date
 
 
 # ====== APIS ======
+"""Binance API configuration: selects live or testnet credentials and base URL, validates that secrets are present."""
+
 # --- BINANCE / TESTNET CONFIGURATION ---
 if TESTNET:
     BINANCE_API_KEY = os.getenv("TESTNET_API_KEY")
@@ -158,6 +171,8 @@ else:
 
 
 # ====== SAFE DEPLOYMENT PATTERN ======
+"""Boot protection and grace period logic, health checks, and bot readiness state machine to prevent trading during unstable deploys."""
+
 BOOT_TIME = time.time()
 BOT_READY = False
 LAST_HEALTH_CHECK = 0
@@ -261,11 +276,15 @@ def trading_guard():
 
 
 # ====== TIME FUNCTION ======
+"""Returns the current UTC timestamp in milliseconds for Binance API request signing."""
+
 def _now_ms():
     return int(time.time() * 1000)
 
 
 # ====== SIGNING AND REQUESTING ======
+"""HMAC-SHA256 request signing, retry logic with exponential backoff, and signed/unsigned request dispatchers."""
+
 # --- SIGNING ---
 def sign_params_query(params: dict, secret: str):
     query = "&".join([f"{k}={v}" for k, v in params.items()])
@@ -277,6 +296,7 @@ def _request_with_retries(method: str, url: str, **kwargs):
     for i in range(RETRIES):
         try:
             resp = requests.request(method, url, timeout=10, **kwargs)
+
             if resp.status_code == 429:
                 logger.error(f"🚫 429 RATE LIMIT hit (attempt {i+1}) → sleeping 3s")
                 time.sleep(3)
@@ -289,15 +309,19 @@ def _request_with_retries(method: str, url: str, **kwargs):
                     return resp.text
             else:
                 logger.error(f"⚠️ Attempt {i+1} failed: {resp.text}")
+
         except Exception as e:
             logger.error(f"⚠️ Request error: {e}")
+
         time.sleep(1)
+
     raise Exception("❌ Request failed after retries")
 
 # --- SEND REQUESTS ---
 def send_signed_request(http_method: str, path: str, payload: dict):
     if "timestamp" not in payload:
         payload["timestamp"] = _now_ms()
+
     query_string = "&".join([f"{k}={v}" for k, v in payload.items()])
     signature = hmac.new(BINANCE_API_SECRET.encode(), query_string.encode(), hashlib.sha256).hexdigest()
     url = f"{BASE_URL}{path}?{query_string}&signature={signature}"
@@ -306,6 +330,8 @@ def send_signed_request(http_method: str, path: str, payload: dict):
 
 
 # ====== BALANCE & MARKET DATA ======
+"""Fetches free margin balance for a given asset and retrieves symbol lot size, tick size, and notional constraints from exchange info."""
+
 def get_balance_margin(asset="USDC") -> float:
     ts = _now_ms()
     params = {"timestamp": ts}
@@ -318,22 +344,34 @@ def get_balance_margin(asset="USDC") -> float:
 
 def get_symbol_lot(symbol):
     if EXCHANGE_INFO is None:
-        logger.warning("⚠ Exchange info is none -> Reloading...")
+        logger.error("⚠ Exchange info is none -> Reloading...")
         load_exchange_info()
+
     data = EXCHANGE_INFO
     for s in data["symbols"]:
         if s["symbol"] == symbol:
             fs = next((f for f in s["filters"] if f["filterType"] == "LOT_SIZE"), None)
             ts = next((f for f in s["filters"] if f["filterType"] == "PRICE_FILTER"), None)
             mnf = next((f for f in s["filters"] if f["filterType"] in ("MIN_NOTIONAL", "NOTIONAL")), None)
+
             if not fs or not ts:
                 raise Exception(f"❌ Missing LOT_SIZE or PRICE_FILTER for {symbol}")
+
             minNotional = float(mnf.get("minNotional") or mnf.get("notional") or 0.0) if mnf else 0.0
-            return {"stepSize_str": fs["stepSize"], "stepSize": float(fs["stepSize"]), "minQty": float(fs.get("minQty", 0.0)), "tickSize_str": ts["tickSize"], "tickSize": float(ts["tickSize"]), "minNotional": minNotional,}
+            return {
+                "stepSize_str": fs["stepSize"],
+                "stepSize": float(fs["stepSize"]),
+                "minQty": float(fs.get("minQty", 0.0)),
+                "tickSize_str": ts["tickSize"],
+                "tickSize": float(ts["tickSize"]),
+                "minNotional": minNotional,}
+
     raise Exception(f"❌ Symbol not found: {symbol}")
 
 
 # ====== SNAPSHOT METRICS ======
+"""Periodic account snapshots stored in memory for the metrics dashboard: balance, margin level, debt, and trade activity."""
+
 SNAPSHOT_HISTORY = []
 SNAPSHOT_LOCK = Lock()
 
@@ -364,7 +402,6 @@ def store_snapshot(snapshot):
             SNAPSHOT_HISTORY.pop(0)
 
 def get_margin_account():
-    logger.info("📊 Fetching margin account info...")
     params = {}
     acc = send_signed_request("GET", "/sapi/v1/margin/account", params)
     return acc
@@ -427,6 +464,22 @@ def build_snapshot():
         "tradeId": TRADE_COUNTER,
     }
 
+    snapshot["variables"] = {
+        "trading": TRADING,
+        "testnet": TESTNET,
+        "sl_override": SL_OVERRIDE,
+        "tp_override": TP_OVERRIDE,
+        "sl_pct": SL_PCT,
+        "tp_pct": TP_PCT,
+        "retries": RETRIES,
+        "snapshot_interval": SNAPSHOT_INTERVAL,
+        "max_snapshots": MAX_SNAPSHOTS,
+        "log_view": LOG_VIEW,
+        "login_limit": LOGIN_LIMIT,
+        "login_retry": LOGIN_RETRY,
+        "session_timeout": SESSION_TIMEOUT,
+    }
+
     return snapshot
 
 def snapshot_worker():
@@ -449,6 +502,8 @@ except Exception as e:
 
 
 # ====== DEPLOY LOADING ======
+"""Loads Binance exchange info on startup and logs the deploy timestamp."""
+
 # --- EXCHANGE INFO ---
 EXCHANGE_INFO = None
 
@@ -473,6 +528,8 @@ logger.info(f"________________________________________")
 
 
 # ====== TRADE COUNTER ======
+"""Thread-safe trade ID generator, daily trade summary logger, and midnight reset watcher."""
+
 # --- TRADE ID ---
 def next_trade_id():
     global TRADE_COUNTER
@@ -486,8 +543,8 @@ def check_daily_summary():
     global DAILY_LONGS, DAILY_SHORTS, CURRENT_DAY
 
     now_day = datetime.utcnow().date()
-    if now_day != CURRENT_DAY:
 
+    if now_day != CURRENT_DAY:
         total_trades = DAILY_LONGS + DAILY_SHORTS
 
         if total_trades > 0:
@@ -512,6 +569,8 @@ threading.Thread(target=daily_watcher, daemon=True).start()
 
 
 # ====== PRICE ADJUST (tickSize) ======
+"""Utility functions for rounding prices and quantities to Binance-compliant tick sizes and step sizes."""
+
 def format_price_to_tick(price: float, tick_size_str: str, rounding=ROUND_DOWN) -> str:
     d_tick = Decimal(str(tick_size_str))
     p = Decimal(str(price)).quantize(d_tick, rounding=rounding)
@@ -531,6 +590,8 @@ def tick_decimals(tick_str: str):
 
 
 # ====== CHECK MARGIN LEVEL BEFORE OPERATING ======
+"""Pre-trade margin safety check: blocks or limits trading based on margin level thresholds, triggers controlled liquidation if critical."""
+
 TRADING_BLOCKED = False
 MARGIN_MAX_RISK_PCT = MAX_RISK_PCT
 
@@ -584,6 +645,8 @@ def check_margin_level():
 
 
 # ====== FINAL RISK RESOLUTION ======
+"""Resolves the effective risk percentage for a trade, applying webhook overrides and margin-based caps."""
+
 def resolve_risk_pct(webhook_data=None):
 
     risk_pct = DEFAULT_RISK_PCT
@@ -599,13 +662,18 @@ def resolve_risk_pct(webhook_data=None):
 
 
 # ====== PRE-TRADE CLEANUP ======
+"""Before each trade: cancels open orders, repays outstanding debt, and sells residual asset balance back to USDC."""
+
 def handle_pre_trade_cleanup(symbol: str):
     base_asset = symbol.replace("USDC", "")
     logger.info(f"🔄 Cleaning previous environment for {symbol}...")
 
     # === 1️⃣ Cancel pending orders ===
     try:
-        params = {"symbol": symbol, "timestamp": _now_ms()}
+        params = {
+            "symbol": symbol,
+            "timestamp": _now_ms()}
+
         send_signed_request("DELETE", "/sapi/v1/margin/openOrders", params)
         logger.info(f"🧹 Pending orders for {symbol} canceled")
     except Exception as e:
@@ -660,10 +728,17 @@ def handle_pre_trade_cleanup(symbol: str):
                     raise Exception("❌ Buy notional below minNotional, aborting repay cleanup")
 
                 needed_usdc = qty_f * price_est
+
                 if needed_usdc > free_usdc:
                     raise Exception(f"❌ Not enough USDC to buy repay asset (need {needed_usdc:.4f}, have {free_usdc:.4f})")
 
-                buy_params = {"symbol": symbol, "side": "BUY", "type": "MARKET", "quantity": qty_str, "timestamp": _now_ms()}
+                buy_params = {
+                    "symbol": symbol,
+                    "side": "BUY",
+                    "type": "MARKET",
+                    "quantity": qty_str,
+                    "timestamp": _now_ms()}
+
                 send_signed_request("POST", "/sapi/v1/margin/order", buy_params)
                 logger.info(f"🛒 Bought {qty_str} {base_asset} to reduce debt")
 
@@ -684,11 +759,16 @@ def handle_pre_trade_cleanup(symbol: str):
             repay_amount = min(borrowed, free_base)
 
             if repay_amount > 0:
-                repay_params = {"asset": base_asset, "amount": str(repay_amount), "timestamp": _now_ms()}
+                repay_params = {
+                    "asset": base_asset,
+                    "amount": str(repay_amount),
+                    "timestamp": _now_ms()}
+
                 send_signed_request("POST", "/sapi/v1/margin/repay", repay_params)
                 logger.info(f"💰 Repay executed: {repay_amount} {base_asset}")
 
             remaining = borrowed - repay_amount
+
             if remaining > 0:
                 logger.info(f"⚠️ Remaining debt after repay: {remaining:.8f} {base_asset}")
             else:
@@ -708,6 +788,7 @@ def handle_pre_trade_cleanup(symbol: str):
         acc_data = _request_with_retries("GET", url, headers=headers)
 
         asset_data = next((a for a in acc_data["userAssets"] if a["asset"] == base_asset), None)
+
         if not asset_data:
             return
 
@@ -718,11 +799,18 @@ def handle_pre_trade_cleanup(symbol: str):
             return
 
         qty_str = floor_to_step_str(free, lot["stepSize_str"])
+
         if float(qty_str) <= 0:
             logger.info(f"ℹ️ Residual {base_asset} too small to sell")
             return
 
-        sell_params = {"symbol": symbol, "side": "SELL", "type": "MARKET", "quantity": qty_str, "timestamp": _now_ms()}
+        sell_params = {
+            "symbol": symbol,
+            "side": "SELL",
+            "type": "MARKET",
+            "quantity": qty_str,
+            "timestamp": _now_ms()}
+
         send_signed_request("POST", "/sapi/v1/margin/order", sell_params)
         logger.info(f"🧹 Sold residual {qty_str} {base_asset} to USDC")
 
@@ -731,13 +819,21 @@ def handle_pre_trade_cleanup(symbol: str):
 
 
 # ====== MAIN FUNCTIONS ======
+"""Core trade execution: margin long (buy with quote quantity), margin short (borrow and sell), post-trade handling, and SL/TP placement."""
+
 # --- MARGIN LONG ---
 def execute_long_margin(symbol, webhook_data=None):
     lot = get_symbol_lot(symbol)
     balance_usdc = get_balance_margin("USDC")
     risk_pct = resolve_risk_pct(webhook_data)
     qty_quote = balance_usdc * risk_pct
-    params = {"symbol": symbol, "side": "BUY", "type": "MARKET", "quoteOrderQty": format(qty_quote, "f"), "timestamp": _now_ms()}
+    params = {
+        "symbol": symbol,
+        "side": "BUY",
+        "type": "MARKET",
+        "quoteOrderQty": format(qty_quote, "f"),
+        "timestamp": _now_ms()}
+
     resp = send_signed_request("POST", "/sapi/v1/margin/order", params)
     executed_qty, entry_price = extract_execution_info(resp)
     trade_id = next_trade_id()
@@ -773,7 +869,13 @@ def execute_short_margin(symbol, webhook_data=None):
         logger.error(f"❌ Borrow failed: {e}")
         return {"error": "borrow_failed"}
 
-    params = {"symbol": symbol, "side": "SELL", "type": "MARKET", "quantity": qty_str, "timestamp": _now_ms()}
+    params = {
+        "symbol": symbol,
+        "side": "SELL",
+        "type": "MARKET",
+        "quantity": qty_str,
+        "timestamp": _now_ms()}
+
     resp = send_signed_request("POST", "/sapi/v1/margin/order", params)
     executed_qty, entry_price = extract_execution_info(resp)
     trade_id = next_trade_id()
@@ -784,7 +886,7 @@ def execute_short_margin(symbol, webhook_data=None):
     handle_post_trade(symbol, side, resp, lot, webhook_data, trade_id)
     return {"order": resp, "trade_id": trade_id}
 
-# --- BORROW ---
+# --- BORROWING (FOR SHORT) ---
 def borrowing(raw_qty, lot, price_est, symbol):
     borrow_amount = float(raw_qty.quantize(Decimal(str(lot["stepSize_str"])), rounding=ROUND_DOWN))
 
@@ -831,8 +933,10 @@ def extract_execution_info(resp):
         try:
             executed_qty = float(resp.get("executedQty", 0) or 0)
             cumm = float(resp.get("cummulativeQuoteQty", 0) or 0)
+
             if executed_qty:
                 entry_price = cumm / executed_qty
+
         except Exception:
             pass
 
@@ -843,7 +947,7 @@ def handle_post_trade(symbol, side, resp, lot, webhook_data, trade_id):
     executed_qty, entry_price = extract_execution_info(resp)
 
     if executed_qty == 0:
-        logger.warning(f"[TRADE {trade_id}] ⚠️ No execution detected")
+        logger.error(f"[TRADE {trade_id}] ⚠️ No execution detected")
 
     emoji = "📈" if side == "BUY" else "📉"
     logger.info(f"[TRADE {trade_id}] {emoji} {side} executed {symbol}: qty={executed_qty} (spent≈{(entry_price * executed_qty) if entry_price is not None else 'unknown'} USDC)")
@@ -884,12 +988,14 @@ def update_last_trade(symbol: str, side: str):
 
 
 # ====== SL/TP FUNCTIONS ======
+"""Places OCO, stop-loss-only, or take-profit-only orders after trade execution, with tick-aligned prices and commission-adjusted quantities."""
+
 def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty: float, lot: dict, sl_override=None, tp_override=None, trade_id=None):
     try:
         COMMISSION_BUFFER = Decimal("1") - (COMMISSION / Decimal("100"))
         oco_side = "SELL" if side == "BUY" else "BUY"
 
-        # === Determine if SL/TP should be used ===
+        # --- Determine if SL/TP should be used ---
         use_sl = sl_override is not None or (SL_OVERRIDE and SL_PCT is not None)
         use_tp = tp_override is not None or (TP_OVERRIDE and TP_PCT is not None)
 
@@ -897,7 +1003,7 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
             logger.info(f"[TRADE {trade_id}] ℹ️ No SL/TP requested for {symbol}")
             return True
 
-        # === Price calculation ===
+        # --- Price calculation ---
         if sl_override is not None:
             sl_price = float(sl_override)
         elif SL_OVERRIDE and SL_PCT is not None:
@@ -912,19 +1018,21 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
         else:
             tp_price = None
 
-        # === Tick alignment function ===
+        # --- Tick alignment function ---
         def align_price(price: float, tick_str: str, rounding):
             tick = float(tick_str)
+
             if rounding == ROUND_DOWN:
                 return math.floor(price / tick) * tick
             else:
                 return math.ceil(price / tick) * tick
 
         decimals = lot["tickSize_str"].split('.')[-1].find('1')
+
         if decimals < 0:
             decimals = 8
 
-        # === Align SL/TP to tickSize ===
+        # --- Align SL/TP to tickSize ---
         sl_price_str = None
         tp_price_str = None
         stop_limit_price = None
@@ -945,11 +1053,11 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
             tp_price_aligned = align_price(tp_price, lot["tickSize_str"], tp_rounding)
             tp_price_str = f"{tp_price_aligned:.{decimals}f}"
 
-        # === Quantity alignment ===
+        # --- Quantity alignment ---
         qty_str = floor_to_step_str(executed_qty * float(COMMISSION_BUFFER), lot["stepSize_str"])
         qty_f = float(qty_str)
 
-        # === Decide order type ===
+        # --- Decide order type ---
         if sl_price_str and tp_price_str:
             order_type = "OCO"
         elif sl_price_str:
@@ -957,20 +1065,23 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
         elif tp_price_str:
             order_type = "TP_ONLY"
 
-        # === Basic validations ===
+        # --- Basic validations ---
         for label, price_str in [("SL", sl_price_str), ("TP", tp_price_str)]:
             if price_str is None:
                 continue
             price_f = float(price_str)
+
             if price_f <= 0 or price_f < lot["tickSize"]:
                 logger.error(f"⚠️ Skipping {label} for {symbol}: price {price_f} < tickSize {lot['tickSize']}")
                 return False
+
             notional = price_f * qty_f
+
             if notional < lot.get("minNotional", 0.0):
                 logger.error(f"⚠️ Skipping {label} for {symbol}: notional {notional:.8f} < minNotional {lot.get('minNotional')}")
                 return False
 
-        # === Place OCO ===
+        # --- Place OCO ---
         if order_type == "OCO":
             params = {
                 "symbol": symbol,
@@ -998,7 +1109,7 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
                 logger.error(f"⚠️ Failed OCO for {symbol}, payload={params}: {e}")
                 return False
 
-        # === SL ONLY ===
+        # --- SL ONLY ---
         if order_type == "SL_ONLY":
             params = {
                 "symbol": symbol,
@@ -1014,7 +1125,7 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
             logger.info(f"[TRADE {trade_id}] 🛑 SL placed for {symbol}: stop={sl_price_str}, limit={stop_limit_price}, qty={qty_str}")
             return True
 
-        # === TP ONLY ===
+        # --- TP ONLY ---
         if order_type == "TP_ONLY":
             params = {
                 "symbol": symbol,
@@ -1035,6 +1146,8 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
 
 
 # ====== MILESTONES ======
+"""Detects and logs balance milestones (500, 1000, 2000... USDC) as they are reached for the first time."""
+
 MILESTONES_USDC = [500, 1000, 2000, 5000, 10000, 25000, 50000]
 REACHED_MILESTONES = set()
 
@@ -1057,6 +1170,8 @@ def check_milestones(total_balance_usdc: float):
 
 
 # ====== CENSORING KEYS ======
+"""Redacts sensitive fields (admin_key, trading_key) from logged payloads."""
+
 SENSITIVE_FIELDS = {"admin_key", "trading_key"}
 
 def sanitize_payload(payload: dict) -> dict:
@@ -1068,11 +1183,13 @@ def sanitize_payload(payload: dict) -> dict:
 
 
 # ====== ADMIN FUNCTIONS ======
+"""Administrative operations: clear positions, read account snapshot, borrow/repay USDC, toggle trading parameters, and restore defaults."""
+
 def clear(symbol=None):
     if symbol:
-        logger.admin(f"🔁 Converting {symbol} to USDC...")
+        logger.admin(f"🔁 ADMIN ACTION: Converting {symbol} to USDC...")
     else:
-        logger.admin("🔁 Converting ALL assets to USDC...")
+        logger.admin("🔁 ADMIN_ACTION: Converting ALL assets to USDC...")
 
     account = get_margin_account()
     cleared_symbols = []
@@ -1093,7 +1210,7 @@ def clear(symbol=None):
         try:
             get_symbol_lot(asset_symbol)
         except:
-            logger.warning(f"⚠️ No USDC pair for {asset_name}, skipping")
+            logger.error(f"⚠️ No USDC pair for {asset_name}, skipping")
             continue
 
         try:
@@ -1109,7 +1226,7 @@ def clear(symbol=None):
     return {"cleared": cleared_symbols, "failed": failed_symbols}
 
 def read():
-    logger.admin("📊 Reading Cross Margin account snapshot...")
+    logger.admin("📊 ADMIN ACTION: Reading Cross Margin account snapshot...")
     snapshot = build_snapshot()
     logger.admin("────────── 📊 ACCOUNT VARIABLES 📊 ──────────")
     logger.admin(f"├─ 🤖 Trading              : {TRADING}")
@@ -1119,8 +1236,14 @@ def read():
     logger.admin(f"├─ 🔴 Stop Loss Value      : {SL_PCT} %")
     logger.admin(f"├─ 🟢 Take Profit Value    : {TP_PCT} %")
     logger.admin(f"├─ 🔄 Retries Value        : {RETRIES}")
+    logger.admin("────────── 📊 ADMIN VARIABLES 📊 ──────────")
     logger.admin(f"├─ 📸 Snapshot Interval    : Every {SNAPSHOT_INTERVAL} day(s)")
-    logger.admin("__________ 📊 TRADING STATUS 📊 ──────────")
+    logger.admin(f"├─ 💾 Max Snapshot Storage : {MAX_SNAPSHOTS} snapshots")
+    logger.admin(f"├─ 📠 Log Preview Amount   : {LOG_VIEW} log(s)")
+    logger.admin(f"├─ 🔑 Login Attempt Limit  : {LOGIN_LIMIT} attempt(s)")
+    logger.admin(f"├─ ⏱ Login Retry Period   : {LOGIN_RETRY} minute(s)")
+    logger.admin(f"├─ ⏳ Admin Session Timeout : {SESSION_TIMEOUT} minute(s)")
+    logger.admin("────────── 📊 TRADING STATUS 📊 ──────────")
     logger.admin(f"├─ 📢 Last Trade ID        : Trade No. {snapshot['tradeId']}")
     logger.admin(f"├─ 📈 Longs Today          : {snapshot['longsToday']}")
     logger.admin(f"├─ 📉 Shorts Today         : {snapshot['shortsToday']}")
@@ -1148,7 +1271,7 @@ def read():
     return snapshot
 
 def borrow(amount: float):
-    logger.admin(f"📥 ADMIN BORROW requested: {amount} USDC")
+    logger.admin(f"📥 ADMIN ACTION: Borrow requested: {amount} USDC")
 
     if amount <= 0:
         raise ValueError("Borrow amount must be > 0")
@@ -1160,13 +1283,18 @@ def borrow(amount: float):
     if margin_level < 2:
         raise Exception("❌ Margin level too low to safely borrow USDC")
 
-    params = {"asset": "USDC", "amount": format(amount, "f"), "timestamp": _now_ms()}
+    params = {
+        "asset": "USDC",
+        "amount": format(amount, "f"),
+        "timestamp": _now_ms()}
+
     resp = send_signed_request("POST", "/sapi/v1/margin/loan", params)
     logger.admin(f"✅ BORROW completed: {amount} USDC")
     return resp
 
 def repay(amount):
-    logger.admin(f"💳 ADMIN REPAY requested: {amount}")
+    logger.admin(f"💳 ADMIN ACTION: Repay requested: {amount}")
+
     if isinstance(amount, str) and amount.lower() == "all":
         margin_info = get_margin_account()
 
@@ -1184,10 +1312,15 @@ def repay(amount):
         logger.admin(f"🔁 REPAY ALL → {amount} USDC")
 
     amount = Decimal(str(amount))
+
     if amount <= 0:
         raise ValueError("Repay amount must be > 0")
 
-    params = {"asset": "USDC", "amount": format(amount, "f"), "timestamp": _now_ms()}
+    params = {
+        "asset": "USDC",
+        "amount": format(amount, "f"),
+        "timestamp": _now_ms()}
+
     resp = send_signed_request("POST", "/sapi/v1/margin/repay", params)
     logger.admin(f"✅ REPAY completed: {amount} USDC")
     return resp
@@ -1224,13 +1357,12 @@ def set_sl(state=None, value=None):
     global SL_OVERRIDE, SL_PCT
 
     if state is not None:
-
         if state == "on":
             SL_OVERRIDE = True
-            logger.admin("🟢 SL override ENABLED")
+            logger.admin("🟢 ADMIN_ACTION: SL override ENABLED")
         elif state == "off":
             SL_OVERRIDE = False
-            logger.admin("🔴 SL override DISABLED")
+            logger.admin("🔴 ADMIN_ACTION: SL override DISABLED")
         else:
             return {"status": "error", "msg": "invalid state"}
 
@@ -1253,13 +1385,12 @@ def set_tp(state=None, value=None):
     global TP_OVERRIDE, TP_PCT
 
     if state is not None:
-
         if state == "on":
             TP_OVERRIDE = True
-            logger.admin("🟢 TP override ENABLED")
+            logger.admin("🟢 ADMIN ACTION: TP override ENABLED")
         elif state == "off":
             TP_OVERRIDE = False
-            logger.admin("🔴 TP override DISABLED")
+            logger.admin("🔴 ADMIN ACTION: TP override DISABLED")
         else:
             return {"status": "error", "msg": "invalid state"}
 
@@ -1310,30 +1441,99 @@ def set_log_view(value=None):
 
     return {"status": "error", "msg": "no state or value provided"}
 
+def set_login_limit(value=None):
+    global LOGIN_LIMIT
+
+    if value is not None:
+
+        try:
+            value = int(value)
+        except:
+            return {"status": "error", "msg": "invalid LOGIN_LIMIT value"}
+
+        LOGIN_LIMIT = max(1, min(value, 15))
+        logger.admin(f"🛠️ ADMIN ACTION: LOGIN_LIMIT value updated → {LOGIN_LIMIT}")
+        return {"status": "ok", "login_limit_value": LOGIN_LIMIT}
+
+    return {"status": "error", "msg": "no state or value provided"}
+
+def set_login_retry(value=None):
+    global LOGIN_RETRY
+
+    if value is not None:
+
+        try:
+            value = int(value)
+        except:
+            return {"status": "error", "msg": "invalid LOGIN_RETRY value"}
+
+        LOGIN_RETRY = max(1, min(value, 15))
+        logger.admin(f"🛠️ ADMIN ACTION: LOGIN_RETRY value updated → {LOGIN_RETRY}")
+        return {"status": "ok", "login_retry_value": LOGIN_RETRY}
+
+    return {"status": "error", "msg": "no state or value provided"}
+
+def set_session_timeout(value=None):
+    global SESSION_TIMEOUT
+
+    if value is not None:
+
+        try:
+            value = int(value)
+        except:
+            return {"status": "error", "msg": "invalid SESSION_TIMEOUT value"}
+
+        SESSION_TIMEOUT = max(1, min(value, 15))
+        logger.admin(f"🛠️ ADMIN ACTION: SESSION_TIMEOUT value updated → {SESSION_TIMEOUT}")
+        return {"status": "ok", "session_timeout_value": SESSION_TIMEOUT}
+
+    return {"status": "error", "msg": "no state or value provided"}
+
 def restore():
-    global RETRIES, SL_PCT, TP_PCT, TRADING, TESTNET, SL_OVERRIDE, TP_OVERRIDE, LOG_VIEW
+    global SL_PCT, TP_PCT, RETRIES, LOG_VIEW, TRADING, TESTNET, SL_OVERRIDE, TP_OVERRIDE, LOGIN_LIMIT, LOGIN_RETRY, SESSION_TIMEOUT
 
     logger.admin("🛠️ ADMIN ACTION: RESTORE default trading parameters")
-    RETRIES = DFT_RETRIES
-    SL_PCT = DFT_SL_PCT
-    TP_PCT = DFT_TP_PCT
     TRADING = DFT_TRADING
     TESTNET = DFT_TESTNET
     SL_OVERRIDE = DFT_SL_OVERRIDE
     TP_OVERRIDE = DFT_TP_OVERRIDE
+    SL_PCT = DFT_SL_PCT
+    TP_PCT = DFT_TP_PCT
+    RETRIES = DFT_RETRIES
     LOG_VIEW = DFT_LOG_VIEW
-    logger.admin(f"🔄 RETRIES restored → {RETRIES}")
-    logger.admin(f"🔄 SL_PCT restored → {SL_PCT}")
-    logger.admin(f"🔄 TP_PCT restored → {TP_PCT}")
+    LOGIN_LIMIT = DFT_LOGIN_LIMIT
+    LOGIN_RETRY = DFT_LOGIN_RETRY
+    SESSION_TIMEOUT = DFT_SESSION_TIMEOUT
     logger.admin(f"🔄 TRADING restored → {TRADING}")
     logger.admin(f"🔄 TESTNET restored → {TESTNET}")
     logger.admin(f"🔄 SL_OVERRIDE restored → {SL_OVERRIDE}")
     logger.admin(f"🔄 TP_OVERRIDE restored → {TP_OVERRIDE}")
+    logger.admin(f"🔄 SL_PCT restored → {SL_PCT}")
+    logger.admin(f"🔄 TP_PCT restored → {TP_PCT}")
+    logger.admin(f"🔄 RETRIES restored → {RETRIES}")
     logger.admin(f"🔄 LOG_VIEW restored → {LOG_VIEW}")
-    return {"status": "ok", "RETRIES": RETRIES, "SL_PCT": SL_PCT, "TP_PCT": TP_PCT, "TRADING": TRADING, "TESTNET": TESTNET, "SL_OVERRIDE": SL_OVERRIDE, "TP_OVERRIDE": TP_OVERRIDE, "LOG_VIEW": LOG_VIEW}
+    logger.admin(f"🔄 LOGIN_LIMIT restored → {LOGIN_LIMIT}")
+    logger.admin(f"🔄 LOGIN_RETRY restored → {LOGIN_RETRY}")
+    logger.admin(f"🔄 SESSION_TIMEOUT restored → {SESSION_TIMEOUT}")
+    return {
+        "TRADING": TRADING,
+        "TESTNET": TESTNET,
+        "SL_OVERRIDE": SL_OVERRIDE,
+        "TP_OVERRIDE": TP_OVERRIDE,
+        "status": "ok",
+        "SL_PCT": SL_PCT,
+        "TP_PCT": TP_PCT,
+        "RETRIES": RETRIES,
+        "LOG_VIEW": LOG_VIEW,
+        "LOGIN_LIMIT": LOGIN_LIMIT,
+        "LOGIN_RETRY": LOGIN_RETRY,
+        "SESSION_TIMEOUT": SESSION_TIMEOUT,
+    }
 
 
 # ====== ADMIN ACTIONS ======
+"""Registry mapping admin action names to their handler functions."""
+
 ADMIN_ACTIONS = {
     "CLEAR": clear,
     "READ": read,
@@ -1344,12 +1544,17 @@ ADMIN_ACTIONS = {
     "SL": set_sl,
     "TP": set_tp,
     "RETRIES": set_retries,
-    "RESTORE": restore,
     "LOG_VIEW": set_log_view,
+    "LOGIN_LIMIT": set_login_limit,
+    "LOGIN_RETRY": set_login_retry,
+    "SESSION_TIMEOUT": set_session_timeout,
+    "RESTORE": restore,
 }
 
 
 # ====== ADMIN SYSTEM ======
+"""Session-based admin authentication: IP-tracked sessions with timeout, login rate limiting, and unauthorized request handling."""
+
 # --- ADMIN PLACEHOLDERS ---
 ADMIN_SESSIONS = {}
 LOGIN_ATTEMPTS = {}
@@ -1377,7 +1582,7 @@ def is_admin_authenticated():
 
     last_activity = ADMIN_SESSIONS[ip]
 
-    if time.time() - last_activity > (ADMIN_TIMEOUT * 60):
+    if time.time() - last_activity > (SESSION_TIMEOUT * 60):
         logger.admin(f"🔒 Admin session expired for {ip}")
         del ADMIN_SESSIONS[ip]
         return False
@@ -1396,11 +1601,11 @@ def is_rate_limited(ip):
     now = time.time()
     attempts = LOGIN_ATTEMPTS.get(ip, [])
 
-    attempts = [t for t in attempts if now - t < (LOGIN_WINDOW * 60)]
+    attempts = [t for t in attempts if now - t < (LOGIN_RETRY * 60)]
     attempts.append(now)
     LOGIN_ATTEMPTS[ip] = attempts
 
-    return len(attempts) > MAX_LOGIN_ATTEMPTS
+    return len(attempts) > LOGIN_LIMIT
 
 def reset_login_attempts(ip):
     if ip in LOGIN_ATTEMPTS:
@@ -1408,6 +1613,11 @@ def reset_login_attempts(ip):
 
 
 # ====== FLASK WEBHOOK ======
+"""Webhook endpoint that receives trading signals, validates them, and dispatches trade execution in a background thread."""
+
+# --- BACKEND ENDPOINTS ---
+TRADE_LOCK = threading.RLock()
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
@@ -1447,11 +1657,11 @@ def process_trade(data):
             logger.info("🔒 TRADE LOCK ACQUIRED")
 
             if not check_margin_level():
-                logger.admin("⛔ Trading blocked (critical margin condition)")
+                logger.error("⛔ Trading blocked (critical margin condition)")
                 return
 
             if TRADING_BLOCKED:
-                logger.admin("⛔ Trading blocked by margin safety system")
+                logger.error("⛔ Trading blocked by margin safety system")
                 return
 
             handle_pre_trade_cleanup(symbol)
@@ -1469,143 +1679,9 @@ def process_trade(data):
             latency = time.time() - start
             logger.info(f"[TRADE {trade_id}] ⏳ Trade execution latency: {latency:.2f}s")
             logger.info(f"[TRADE {trade_id}] 🔓 TRADE LOCK RELEASED")
+
     except Exception as e:
         logger.error(f"🔥 CRITICAL TRADE ERROR: {e}", exc_info=True)
-
-
-@app.route("/login", methods=["GET", "POST"])
-def login():
-    error = None
-
-    if request.method == "POST":
-
-        ip = get_ip()
-        now = time.time()
-
-        attempts = LOGIN_ATTEMPTS.get(ip, [])
-        attempts = [t for t in attempts if now - t < (LOGIN_WINDOW * 60)]
-        LOGIN_ATTEMPTS[ip] = attempts
-
-        if len(attempts) >= MAX_LOGIN_ATTEMPTS:
-            retry_after = int((LOGIN_WINDOW * 60) - (now - attempts[0]))
-
-            if request.is_json:
-                return jsonify({
-                    "error": "Too many login attempts",
-                    "retry_after": retry_after
-                }), 429
-            else:
-                error = f"Too many attempts. Try again in {retry_after}s."
-                return render_template_string(html, error=error)
-
-        if request.is_json:
-            data = request.get_json()
-            admin_key = data.get("admin_key")
-        else:
-            admin_key = request.form.get("admin_key")
-
-        if admin_key == ADMIN_KEY:
-            create_admin_session(ip)
-            reset_login_attempts(ip)
-
-            if request.is_json:
-                return jsonify({"status": "authorized"}), 200
-
-            return redirect(url_for("dashboard"))
-
-        else:
-            attempts.append(now)
-            LOGIN_ATTEMPTS[ip] = attempts
-
-            if request.is_json:
-                return jsonify({"error": "Invalid admin key"}), 401
-
-            error = "Invalid admin key"
-
-    html = """
-    <html>
-    <head>
-        <title>SGNT Login</title>
-        <link rel="icon" type="image/png" href="/static/sgnticon.png">
-        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
-        <style>
-            body {
-                background: linear-gradient(135deg, #0f172a, #020617);
-                color: white;
-                font-family: 'Inter', sans-serif;
-                display: flex;
-                justify-content: center;
-                align-items: center;
-                height: 100vh;
-                margin: 0;
-            }
-
-            .login-box {
-                background: #1e293b;
-                padding: 40px;
-                border-radius: 15px;
-                box-shadow: 0 0 40px rgba(0,0,0,0.6);
-                width: 300px;
-                text-align: center;
-            }
-
-            h1 {
-                margin-bottom: 20px;
-                font-weight: 600;
-            }
-
-            input {
-                width: 100%;
-                padding: 12px;
-                margin-top: 10px;
-                border-radius: 8px;
-                border: none;
-                background: #0f172a;
-                color: white;
-            }
-
-            button {
-                margin-top: 20px;
-                width: 100%;
-                padding: 12px;
-                border: none;
-                border-radius: 8px;
-                background: #3b82f6;
-                color: white;
-                font-weight: 600;
-                cursor: pointer;
-            }
-
-            button:hover {
-                background: #2563eb;
-            }
-
-            .error {
-                color: #ef4444;
-                margin-top: 10px;
-                font-size: 14px;
-            }
-        </style>
-    </head>
-    <body>
-
-        <form method="POST" class="login-box">
-            <h1>🔐 SGNT</h1>
-
-            <input type="password" name="admin_key" placeholder="Enter Admin Key" required>
-
-            <button type="submit">Login</button>
-
-            {% if error %}
-                <div class="error">{{ error }}</div>
-            {% endif %}
-        </form>
-
-    </body>
-    </html>
-    """
-
-    return render_template_string(html, error=error)
 
 
 @app.route("/clear", methods=["GET"])
@@ -1732,6 +1808,36 @@ def admin_log_view():
     return jsonify(result), 200
 
 
+@app.route("/login_limit", methods=["GET"])
+def admin_login_limit():
+    if not is_admin_authenticated():
+        return handle_unauthorized()
+
+    value = request.args.get("value")
+    result = set_login_limit(value)
+    return jsonify(result), 200
+
+
+@app.route("/login_retry", methods=["GET"])
+def admin_login_retry():
+    if not is_admin_authenticated():
+        return handle_unauthorized()
+
+    value = request.args.get("value")
+    result = set_login_retry(value)
+    return jsonify(result), 200
+
+
+@app.route("/session_timeout", methods=["GET"])
+def admin_session_timeout():
+    if not is_admin_authenticated():
+        return handle_unauthorized()
+
+    value = request.args.get("value")
+    result = set_session_timeout(value)
+    return jsonify(result), 200
+
+
 @app.route("/restore", methods=["GET"])
 def admin_restore():
     if not is_admin_authenticated():
@@ -1758,51 +1864,492 @@ def health():
     return jsonify({"bot_ready": BOT_READY, "trading": TRADING, "uptime_seconds": uptime, "mode": "TESTNET" if TESTNET else "LIVE"})
 
 
+@app.route("/snapshot", methods=["GET"])
+def admin_snapshot():
+    if not is_admin_authenticated():
+        return handle_unauthorized()
+
+    snapshot = build_snapshot()
+    milestones = check_milestones(snapshot["totalBalanceUSDC"])
+    snapshot["milestonesReached"] = milestones
+    return jsonify(snapshot), 200
+
+
+# --- FRONTEND ENDPOINTS ---
+@app.route("/")
+def index():
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>SGNT</title>
+        <link rel="icon" type="image/png" href="/static/sgnticon.png">
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
+        <style>
+            *{box-sizing:border-box;margin:0;padding:0}
+            body{background:#0f172a;color:#e2e8f0;font-family:'Inter',sans-serif;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px 20px}
+            .logo{width:180px;margin-bottom:32px;opacity:0.95}
+            .tagline{font-size:12px;letter-spacing:0.12em;color:#475569;text-transform:uppercase;margin-bottom:48px;font-family:'Courier New',monospace}
+            .cards{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;width:100%;max-width:540px;margin-bottom:40px}
+            .card{background:#1e293b;border:0.5px solid #334155;border-radius:8px;padding:16px;text-align:center}
+            .card-val{font-size:11px;font-family:'Courier New',monospace;color:#94a3b8;margin-bottom:4px}
+            .card-label{font-size:10px;letter-spacing:0.06em;color:#475569;text-transform:uppercase}
+            .btn-login{padding:10px 32px;font-size:12px;letter-spacing:0.06em;border:0.5px solid #334155;border-radius:6px;background:transparent;color:#94a3b8;cursor:pointer;text-decoration:none;transition:0.15s;font-family:'Inter',sans-serif;text-transform:uppercase}
+            .btn-login:hover{background:#1e293b;color:#f1f5f9;border-color:#64748b}
+            .footer{position:fixed;bottom:20px;font-size:10px;color:#1e293b;letter-spacing:0.08em;font-family:'Courier New',monospace}
+        </style>
+    </head>
+    <body>
+        <img src="/static/sgntlogo.png" class="logo" alt="SGNT">
+        <div class="tagline">Automated margin trading system</div>
+
+        <div class="cards">
+            <div class="card">
+                <div class="card-val" id="status">—</div>
+                <div class="card-label">Status</div>
+            </div>
+            <div class="card">
+                <div class="card-val" id="mode">—</div>
+                <div class="card-label">Mode</div>
+            </div>
+            <div class="card">
+                <div class="card-val" id="uptime">—</div>
+                <div class="card-label">Uptime</div>
+            </div>
+        </div>
+
+        <a href="/login" class="btn-login">Access</a>
+
+        <div class="footer">SGNT · Autonomous trading infrastructure</div>
+
+        <script>
+            async function loadHealth() {
+                try {
+                    const r = await fetch('/health');
+                    const d = await r.json();
+                    document.getElementById('status').textContent = d.bot_ready ? 'Ready' : 'Booting';
+                    document.getElementById('status').style.color = d.bot_ready ? '#4ade80' : '#fb923c';
+                    document.getElementById('mode').textContent = d.mode;
+                    document.getElementById('mode').style.color = d.mode === 'TESTNET' ? '#fbbf24' : '#4ade80';
+                    const s = d.uptime_seconds;
+                    const h = Math.floor(s / 3600);
+                    const m = Math.floor((s % 3600) / 60);
+                    document.getElementById('uptime').textContent = h + 'h ' + m + 'm';
+                } catch(e) {
+                    document.getElementById('status').textContent = 'Offline';
+                    document.getElementById('status').style.color = '#f87171';
+                }
+            }
+            loadHealth();
+            setInterval(loadHealth, 30000);
+        </script>
+    </body>
+    </html>
+    """
+    return html
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    error = None
+
+    if request.method == "POST":
+        ip = get_ip()
+        now = time.time()
+
+        attempts = LOGIN_ATTEMPTS.get(ip, [])
+        attempts = [t for t in attempts if now - t < (LOGIN_RETRY * 60)]
+        LOGIN_ATTEMPTS[ip] = attempts
+
+        if len(attempts) >= LOGIN_LIMIT:
+            retry_after = int((LOGIN_RETRY * 60) - (now - attempts[0]))
+
+            if request.is_json:
+                return jsonify({"error": "Too many login attempts", "retry_after": retry_after}), 429
+            else:
+                error = f"Too many attempts. Try again in {retry_after}s."
+        else:
+            if request.is_json:
+                data = request.get_json()
+                admin_key = data.get("admin_key")
+            else:
+                admin_key = request.form.get("admin_key")
+
+            if admin_key == ADMIN_KEY:
+                create_admin_session(ip)
+                reset_login_attempts(ip)
+
+                if request.is_json:
+                    return jsonify({"status": "authorized"}), 200
+                return redirect(url_for("dashboard"))
+            else:
+                attempts.append(now)
+                LOGIN_ATTEMPTS[ip] = attempts
+
+                if request.is_json:
+                    return jsonify({"error": "Invalid admin key"}), 401
+                error = "Invalid admin key"
+
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>SGNT Login</title>
+        <link rel="icon" type="image/png" href="/static/sgnticon.png">
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
+        <style>
+            *{box-sizing:border-box;margin:0;padding:0}
+            body{background:#0f172a;color:#e2e8f0;font-family:'Inter',sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center}
+            .box{width:300px;text-align:center}
+            .icon{width:48px;margin:0 auto 20px;display:block}
+            .title{font-size:13px;font-weight:500;color:#f1f5f9;margin-bottom:4px;letter-spacing:0.02em}
+            .subtitle{font-size:11px;color:#475569;margin-bottom:28px;font-family:'Courier New',monospace;letter-spacing:0.06em}
+            .input-wrap{position:relative;margin-bottom:10px}
+            input[type=password]{width:100%;padding:10px 14px;background:#1e293b;border:0.5px solid #334155;border-radius:6px;color:#f1f5f9;font-size:13px;font-family:'Inter',sans-serif;outline:none;transition:border-color 0.15s}
+            input[type=password]:focus{border-color:#64748b}
+            input[type=password]::placeholder{color:#475569}
+            .btn{width:100%;padding:10px;background:transparent;border:0.5px solid #334155;border-radius:6px;color:#94a3b8;font-size:12px;letter-spacing:0.06em;text-transform:uppercase;cursor:pointer;transition:0.15s;font-family:'Inter',sans-serif;margin-top:4px}
+            .btn:hover{background:#1e293b;color:#f1f5f9;border-color:#64748b}
+            .error{font-size:11px;color:#f87171;margin-top:14px;font-family:'Courier New',monospace}
+            .back{display:block;margin-top:20px;font-size:11px;color:#334155;text-decoration:none;letter-spacing:0.04em}
+            .back:hover{color:#64748b}
+        </style>
+    </head>
+    <body>
+        <div class="box">
+            <img src="/static/sgnticon.png" class="icon" alt="SGNT">
+            <div class="title">SGNT</div>
+            <div class="subtitle">Admin access</div>
+
+            <form method="POST">
+                <div class="input-wrap">
+                    <input type="password" name="admin_key" placeholder="Admin key" required autofocus>
+                </div>
+                <button type="submit" class="btn">Login</button>
+                {% if error %}
+                    <div class="error">{{ error }}</div>
+                {% endif %}
+            </form>
+
+            <a href="/" class="back">← Back</a>
+        </div>
+    </body>
+    </html>
+    """
+    return render_template_string(html, error=error)
+
+
 @app.route("/dashboard")
 def dashboard():
     if not is_admin_authenticated():
         return handle_unauthorized()
 
     html = """
+    <!DOCTYPE html>
     <html>
     <head>
         <title>SGNT Dashboard</title>
         <link rel="icon" type="image/png" href="/static/sgnticon.png">
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
         <style>
-            body {
-                background-color: #0f172a;
-                color: white;
-                font-family: 'Inter', sans-serif;
-                text-align: center;
-            }
-            .container {
-                margin-top: 100px;
-            }
-            button {
-                padding: 15px 30px;
-                margin: 20px;
-                font-size: 18px;
-                background: #3b82f6;
-                border: none;
-                color: white;
-                border-radius: 10px;
-                cursor: pointer;
-            }
+            *{box-sizing:border-box;margin:0;padding:0}
+            body{background:#0f172a;color:#e2e8f0;font-family:'Inter',sans-serif;padding:20px;font-size:14px}
+            .topbar{display:flex;justify-content:space-between;align-items:center;padding:0 0 14px;border-bottom:0.5px solid #1e293b;margin-bottom:4px}
+            .topbar-left{display:flex;align-items:center;gap:10px}
+            .dot{width:8px;height:8px;border-radius:50%;background:#1D9E75;display:inline-block}
+            .dot.red{background:#E24B4A}
+            .status-text{font-size:11px;color:#94a3b8;font-family:'Courier New',monospace}
+            .tag{font-size:10px;padding:2px 8px;border-radius:6px;border:0.5px solid;font-family:'Courier New',monospace}
+            .tag-live{border-color:#1D9E75;color:#1D9E75}
+            .tag-testnet{border-color:#BA7517;color:#BA7517}
+            .db{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;padding:12px 0}
+            .card{background:#1e293b;border:0.5px solid #334155;border-radius:8px;padding:14px 16px}
+            .card-title{font-size:10px;letter-spacing:0.08em;color:#64748b;text-transform:uppercase;margin-bottom:10px;border-bottom:0.5px solid #334155;padding-bottom:6px}
+            .metric-big{font-size:22px;font-weight:500;color:#f1f5f9;font-family:'Courier New',monospace}
+            .metric-label{font-size:11px;color:#64748b;margin-top:2px}
+            .metric-row{display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:0.5px solid #1e293b;font-size:12px}
+            .metric-row:last-child{border-bottom:none}
+            .metric-row .k{color:#94a3b8}
+            .metric-row .v{color:#f1f5f9;font-weight:500;font-family:'Courier New',monospace}
+            .toggle-row{display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:0.5px solid #1e293b}
+            .toggle-row:last-child{border-bottom:none}
+            .toggle-label{font-size:12px;color:#94a3b8}
+            .toggle{position:relative;width:34px;height:18px;cursor:pointer}
+            .toggle input{opacity:0;width:0;height:0}
+            .slider{position:absolute;inset:0;background:#334155;border-radius:18px;transition:0.2s}
+            .slider:before{content:'';position:absolute;width:12px;height:12px;left:3px;top:3px;background:#94a3b8;border-radius:50%;transition:0.2s}
+            input:checked+.slider{background:#1D9E75}
+            input:checked+.slider:before{transform:translateX(16px);background:white}
+            .input-row{display:flex;gap:6px;margin-top:6px;align-items:center}
+            .input-row input[type=number],.input-row input[type=text]{flex:1;padding:5px 8px;font-size:12px;background:#0f172a;border:0.5px solid #334155;border-radius:6px;color:#f1f5f9;font-family:'Courier New',monospace}
+            .btn{padding:5px 12px;font-size:11px;border:0.5px solid #334155;border-radius:6px;background:#0f172a;color:#94a3b8;cursor:pointer;white-space:nowrap;transition:0.15s}
+            .btn:hover{background:#1e293b;color:#f1f5f9}
+            .btn-danger{border-color:#7f1d1d;color:#fca5a5}
+            .btn-danger:hover{background:#450a0a}
+            .btn-success{border-color:#14532d;color:#86efac}
+            .btn-success:hover{background:#052e16}
+            .col-full{grid-column:1/-1}
+            .col-2{grid-column:span 2}
+            .section-label{font-size:10px;letter-spacing:0.08em;color:#475569;text-transform:uppercase;margin:10px 0 4px;grid-column:1/-1;padding-left:2px}
+            .asset-row{display:flex;justify-content:space-between;font-size:11px;padding:2px 0;color:#94a3b8}
+            .margin-bar-bg{height:4px;background:#334155;border-radius:4px;margin-top:4px;overflow:hidden}
+            .margin-bar-fill{height:100%;border-radius:4px;background:#1D9E75;transition:width 0.4s}
+            .toast{position:fixed;bottom:16px;right:16px;background:#1e293b;border:0.5px solid #334155;border-radius:8px;padding:8px 14px;font-size:12px;color:#f1f5f9;opacity:0;transition:opacity 0.3s;z-index:100;font-family:'Courier New',monospace}
         </style>
     </head>
     <body>
-        <div class="container">
-            <h1>📊 SGNT Control Panel</h1>
 
-            <a href="/metrics">
-                <button>📈 Metrics</button>
-            </a>
-
-            <a href="/logs">
-                <button>🧾 Logs</button>
-            </a>
+    <div class="topbar">
+        <div class="topbar-left">
+            <span class="dot" id="dot"></span>
+            <span class="status-text" id="status-text">Loading...</span>
+            <span class="tag tag-live" id="mode-tag">LIVE</span>
         </div>
+        <div style="display:flex;gap:8px;align-items:center">
+            <span class="status-text" id="uptime-text"></span>
+            <button class="btn" onclick="loadData()">Update</button>
+            <button class="btn btn-danger" onclick="doLogout()">Logout</button>
+        </div>
+    </div>
+
+    <div class="db">
+
+        <div class="section-label">Account</div>
+
+        <div class="card">
+            <div class="card-title">Total Balance</div>
+            <div class="metric-big" id="total-balance">—</div>
+            <div class="metric-label">USDC</div>
+        </div>
+        <div class="card">
+            <div class="card-title">Free USDC Balance</div>
+            <div class="metric-big" id="usdc-balance">—</div>
+            <div class="metric-label">USDC</div>
+        </div>
+        <div class="card">
+            <div class="card-title">Margin level</div>
+            <div class="metric-big" id="margin-level">—</div>
+            <div class="margin-bar-bg"><div class="margin-bar-fill" id="margin-bar" style="width:0%"></div></div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">Debt</div>
+            <div class="metric-row"><span class="k">Total</span><span class="v" id="total-debt">—</span></div>
+            <div class="metric-row"><span class="k">Borrowed USDC</span><span class="v" id="usdc-borrowed">—</span></div>
+        </div>
+        <div class="card col-2">
+            <div class="card-title">Assets with balance</div>
+            <div id="assets-list"><span style="font-size:12px;color:#475569">—</span></div>
+        </div>
+
+        <div class="section-label">Trading</div>
+
+        <div class="card">
+            <div class="card-title">Activity</div>
+            <div class="metric-row"><span class="k">Last Trade ID</span><span class="v" id="last-trade-id">—</span></div>
+            <div class="metric-row"><span class="k">Longs Today</span><span class="v" id="longs-today">—</span></div>
+            <div class="metric-row"><span class="k">Shorts Today</span><span class="v" id="shorts-today">—</span></div>
+            <div class="metric-row"><span class="k">Total Longs</span><span class="v" id="total-longs">—</span></div>
+            <div class="metric-row"><span class="k">Total Shorts</span><span class="v" id="total-shorts">—</span></div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">Control</div>
+            <div class="toggle-row"><span class="toggle-label">Trading</span><label class="toggle"><input type="checkbox" id="tog-trading" onchange="callToggle('trading',this.checked)"><span class="slider"></span></label></div>
+            <div class="toggle-row"><span class="toggle-label">Testnet</span><label class="toggle"><input type="checkbox" id="tog-testnet" onchange="callToggle('testnet',this.checked)"><span class="slider"></span></label></div>
+            <div class="toggle-row"><span class="toggle-label">SL Override</span><label class="toggle"><input type="checkbox" id="tog-sl" onchange="callToggle('sl',this.checked)"><span class="slider"></span></label></div>
+            <div class="toggle-row"><span class="toggle-label">TP Override</span><label class="toggle"><input type="checkbox" id="tog-tp" onchange="callToggle('tp',this.checked)"><span class="slider"></span></label></div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">Parameters</div>
+            <div style="font-size:11px;color:#64748b;margin-bottom:4px">SL % <span id="sl-val" style="color:#f1f5f9">—</span></div>
+            <div class="input-row"><input type="number" id="sl-input" placeholder="ex. 2.0" step="0.1" min="0.1" max="50"><button class="btn" onclick="setParam('sl','value',document.getElementById('sl-input').value)">Set</button></div>
+            <div style="font-size:11px;color:#64748b;margin:8px 0 4px">TP % <span id="tp-val" style="color:#f1f5f9">—</span></div>
+            <div class="input-row"><input type="number" id="tp-input" placeholder="ex. 4.0" step="0.1" min="0.1" max="50"><button class="btn" onclick="setParam('tp','value',document.getElementById('tp-input').value)">Set</button></div>
+            <div style="font-size:11px;color:#64748b;margin:8px 0 4px">Retries <span id="retries-val" style="color:#f1f5f9">—</span></div>
+            <div class="input-row"><input type="number" id="retries-input" placeholder="1-5" min="1" max="5"><button class="btn" onclick="setParam('retries','value',document.getElementById('retries-input').value)">Set</button></div>
+        </div>
+
+        <div class="section-label">Operations</div>
+
+        <div class="card">
+            <div class="card-title">Borrow USDC</div>
+            <div class="input-row"><input type="number" id="borrow-amt" placeholder="USDC quantity"><button class="btn btn-success" onclick="doBorrow()">Borrow</button></div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">Repay USDC</div>
+            <div class="input-row">
+                <input type="text" id="repay-amt" placeholder="Quantity (or 'all')">
+                <button class="btn btn-success" onclick="doRepay()">Repay</button>
+                <button class="btn" onclick="document.getElementById('repay-amt').value='all'">All</button>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">Clear</div>
+            <div class="input-row"><input type="text" id="clear-sym" placeholder="Symbol (empty = all)"><button class="btn btn-danger" onclick="doClear()">Clear</button></div>
+        </div>
+
+        <div class="section-label">Admin</div>
+
+        <div class="card">
+            <div class="card-title">Logs</div>
+            <div style="font-size:11px;color:#64748b;margin-bottom:4px">Log view <span id="log-view-val" style="color:#f1f5f9">—</span></div>
+            <div class="input-row"><input type="number" id="log-view-input" placeholder="0-80" min="0" max="80"><button class="btn" onclick="setParam('log_view','value',document.getElementById('log-view-input').value)">Set</button></div>
+            <div style="margin-top:10px"><a href="/logs"><button class="btn" style="width:100%">See logs</button></a></div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">Admin Session</div>
+            <div style="font-size:11px;color:#64748b;margin-bottom:4px">Session Timeout <span id="session-val" style="color:#f1f5f9">—</span> min</div>
+            <div class="input-row"><input type="number" id="session-input" placeholder="1-15" min="1" max="15"><button class="btn" onclick="setParam('session_timeout','value',document.getElementById('session-input').value)">Set</button></div>
+            <div style="font-size:11px;color:#64748b;margin:8px 0 4px">Login Limit <span id="login-limit-val" style="color:#f1f5f9">—</span></div>
+            <div class="input-row"><input type="number" id="login-limit-input" placeholder="1-15" min="1" max="15"><button class="btn" onclick="setParam('login_limit','value',document.getElementById('login-limit-input').value)">Set</button></div>
+            <div style="font-size:11px;color:#64748b;margin:8px 0 4px">Login Retry <span id="login-retry-val" style="color:#f1f5f9">—</span> min</div>
+            <div class="input-row"><input type="number" id="login-retry-input" placeholder="1-15" min="1" max="15"><button class="btn" onclick="setParam('login_retry','value',document.getElementById('login-retry-input').value)">Set</button></div>
+        </div>
+
+        <div class="card" style="display:flex;flex-direction:column;justify-content:space-between">
+            <div class="card-title">System</div>
+            <p style="font-size:12px;color:#94a3b8;margin-bottom:12px">Restore all parameters to default.</p>
+            <button class="btn btn-danger" style="width:100%" onclick="doRestore()">Restore defaults</button>
+            <div style="margin-top:8px"><a href="/metrics"><button class="btn" style="width:100%">See metrics</button></a></div>
+        </div>
+
+    </div>
+
+    <div class="toast" id="toast"></div>
+
+    <script>
+        function toast(msg, ok=true) {
+            const t = document.getElementById('toast');
+            t.textContent = msg;
+            t.style.borderColor = ok ? '#14532d' : '#7f1d1d';
+            t.style.opacity = '1';
+            setTimeout(() => t.style.opacity = '0', 2500);
+        }
+
+        async function api(url) {
+            try {
+                const r = await fetch(url);
+                if (r.status === 403) { toast('Sesión expirada', false); return null; }
+                return await r.json();
+            } catch(e) { toast('Error de red', false); return null; }
+        }
+
+        async function loadData() {
+            const d = await api('/snapshot');
+            if (!d) return;
+
+            const v = d.variables || {};
+            const fmt = n => n != null ? parseFloat(n).toFixed(2) : '—';
+            const fmtI = n => n != null ? parseInt(n) : '—';
+
+            document.getElementById('total-balance').textContent = fmt(d.totalBalanceUSDC) + ' $';
+            document.getElementById('usdc-balance').textContent = fmt(d.usdcBalance) + ' $';
+            document.getElementById('total-debt').textContent = fmt(d.totalDebt) + ' $';
+            document.getElementById('usdc-borrowed').textContent = fmt(d.usdcBorrowed) + ' $';
+
+            const ml = parseFloat(d.marginLevel) || 0;
+            document.getElementById('margin-level').textContent = ml >= 999 ? '999 (no debt)' : ml.toFixed(2);
+            const barPct = ml >= 999 ? 100 : Math.min(100, (ml / 5) * 100);
+            document.getElementById('margin-bar').style.width = barPct + '%';
+            document.getElementById('margin-bar').style.background = ml < 1.25 ? '#E24B4A' : ml < 2 ? '#BA7517' : '#1D9E75';
+
+            document.getElementById('last-trade-id').textContent = '#' + (d.tradeId || '—');
+            document.getElementById('longs-today').textContent = fmtI(d.longsToday);
+            document.getElementById('shorts-today').textContent = fmtI(d.shortsToday);
+            document.getElementById('total-longs').textContent = fmtI(d.totalLongs);
+            document.getElementById('total-shorts').textContent = fmtI(d.totalShorts);
+
+            const assets = d.assetsWithBalance || [];
+            document.getElementById('assets-list').innerHTML = assets.length
+                ? assets.map(a => `<div class="asset-row"><span>${a.asset}</span><span style="font-family:'Courier New',monospace">${a.balance}</span></div>`).join('')
+                : '<span style="font-size:12px;color:#475569">No assets</span>';
+
+            document.getElementById('tog-trading').checked = !!v.trading;
+            document.getElementById('tog-testnet').checked = !!v.testnet;
+            document.getElementById('tog-sl').checked = !!v.sl_override;
+            document.getElementById('tog-tp').checked = !!v.tp_override;
+
+            document.getElementById('sl-val').textContent = v.sl_pct != null ? v.sl_pct + '%' : '—';
+            document.getElementById('tp-val').textContent = v.tp_pct != null ? v.tp_pct + '%' : '—';
+            document.getElementById('retries-val').textContent = v.retries != null ? v.retries : '—';
+            document.getElementById('log-view-val').textContent = v.log_view != null ? v.log_view : '—';
+            document.getElementById('session-val').textContent = v.session_timeout != null ? v.session_timeout : '—';
+            document.getElementById('login-limit-val').textContent = v.login_limit != null ? v.login_limit : '—';
+            document.getElementById('login-retry-val').textContent = v.login_retry != null ? v.login_retry : '—';
+
+            const live = !!v.trading;
+            const testnet = !!v.testnet;
+            document.getElementById('dot').className = 'dot' + (live ? '' : ' red');
+            document.getElementById('status-text').textContent = live ? 'Trading active' : 'Trading paused';
+            document.getElementById('mode-tag').textContent = testnet ? 'TESTNET' : 'LIVE';
+            document.getElementById('mode-tag').className = 'tag ' + (testnet ? 'tag-testnet' : 'tag-live');
+        }
+
+        async function callToggle(param, checked) {
+            const state = checked ? 'on' : 'off';
+            const d = await api(`/${param}?state=${state}`);
+            if (d) toast(`${param} → ${state}`);
+            await loadData();
+        }
+
+        async function setParam(param, key, val) {
+            if (!val) { toast('Insert value', false); return; }
+            const d = await api(`/${param}?${key}=${val}`);
+            if (d && d.status === 'ok') toast(`${param} updated`);
+            else toast('Error', false);
+            await loadData();
+        }
+
+        async function doBorrow() {
+            const amt = document.getElementById('borrow-amt').value;
+            if (!amt) { toast('Insert quantity', false); return; }
+            const d = await api(`/borrow?amount=${amt}`);
+            if (d) toast(`Borrow ${amt} USDC OK`);
+            await loadData();
+        }
+
+        async function doRepay() {
+            const amt = document.getElementById('repay-amt').value;
+            if (!amt) { toast('Insert quantity or "all"', false); return; }
+            const d = await api(`/repay?amount=${amt}`);
+            if (d) toast(`Repay ${amt} OK`);
+            await loadData();
+        }
+
+        async function doClear() {
+            const sym = document.getElementById('clear-sym').value.trim();
+            const url = sym ? `/clear?symbol=${sym}` : '/clear';
+            const d = await api(url);
+            if (d) toast(sym ? `Clear ${sym} OK` : 'Clear all OK');
+            await loadData();
+        }
+
+        async function doRestore() {
+            const d = await api('/restore');
+            if (d) toast('Restore completed');
+            await loadData();
+        }
+
+        async function doLogout() {
+            await api('/logout');
+            window.location.href = '/login';
+        }
+
+        loadData();
+        document.addEventListener('keydown', e => {
+            if ((e.ctrlKey || e.metaKey) && e.key === 'r') {
+                e.preventDefault();
+                loadData();
+                toast('Updated data');
+            }
+        });
+    </script>
+
     </body>
     </html>
     """
@@ -1820,20 +2367,12 @@ def logs():
 
     if download_all == "all":
         memory_file = io.BytesIO()
-
         with zipfile.ZipFile(memory_file, "w") as zf:
             for f in os.listdir("."):
                 if f.endswith(".log") and os.path.isfile(f):
                     zf.write(f)
-
         memory_file.seek(0)
-
-        return send_file(
-            memory_file,
-            as_attachment=True,
-            download_name="sgnt_logs.zip",
-            mimetype="application/zip"
-        )
+        return send_file(memory_file, as_attachment=True, download_name="sgnt_logs.zip", mimetype="application/zip")
 
     if filename:
         if not filename.endswith(".log"):
@@ -1845,42 +2384,29 @@ def logs():
         if level:
             with open(filename, "r", encoding="utf-8") as f:
                 filtered_lines = (line for line in f if level in line)
-
             return Response(
                 "".join(filtered_lines),
                 mimetype="text/plain",
-                headers={
-                    "Content-Disposition":
-                    f"attachment; filename={filename}({level}).log"
-                }
+                headers={"Content-Disposition": f"attachment; filename={filename}({level}).log"}
             )
-
-        return send_file(
-            filename,
-            as_attachment=True,
-            mimetype="text/plain"
-        )
-
+        return send_file(filename, as_attachment=True, mimetype="text/plain")
 
     log_files = []
-
     for f in os.listdir("."):
         if f.endswith(".log") and os.path.isfile(f):
             size_mb = os.path.getsize(f) / (1024 * 1024)
             modified = os.path.getmtime(f)
-
             log_files.append({
                 "name": f,
                 "size": f"{size_mb:.2f} MB",
                 "modified": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(modified))
             })
-
     log_files.sort(key=lambda x: x["modified"], reverse=True)
 
     latest_logs = []
+
     if log_files:
         latest_file = log_files[0]["name"]
-
         with open(latest_file, "r", encoding="utf-8") as f:
             if LOG_VIEW == 0:
                 latest_logs = []
@@ -1888,128 +2414,94 @@ def logs():
                 latest_logs = list(deque(f, maxlen=LOG_VIEW))
 
     html = """
+    <!DOCTYPE html>
     <html>
     <head>
         <title>SGNT Logs</title>
         <link rel="icon" type="image/png" href="/static/sgnticon.png">
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
         <style>
-            body {
-                background-color: #0f172a;
-                color: white;
-                font-family: 'Inter', sans-serif;
-                padding: 20px;
-            }
-
-            table {
-                width: 100%;
-                border-collapse: collapse;
-                margin-top: 30px;
-            }
-
-            th, td {
-                border: 1px solid #334155;
-                padding: 8px;
-                text-align: center;
-            }
-
-            th {
-                background-color: #1e293b;
-            }
-
-            button {
-                padding: 5px 10px;
-                margin: 2px;
-                border: none;
-                border-radius: 5px;
-                cursor: pointer;
-            }
-
-            .download { background: #3b82f6; color: white; }
-            .info { background: #22c55e; }
-            .warning { background: #eab308; }
-            .error { background: #ef4444; }
-            .admin { background: #8b5cf6; }
-            .date { background: #06b6d4; }
-
-            pre {
-                background: #1e293b;
-                padding: 15px;
-                border-radius: 10px;
-                max-height: 400px;
-                overflow-y: scroll;
-            }
+            *{box-sizing:border-box;margin:0;padding:0}
+            body{background:#0f172a;color:#e2e8f0;font-family:'Inter',sans-serif;padding:20px;font-size:14px}
+            .topbar{display:flex;justify-content:space-between;align-items:center;padding:0 0 14px;border-bottom:0.5px solid #1e293b;margin-bottom:16px}
+            .topbar-left{display:flex;align-items:center;gap:12px}
+            .topbar-title{font-size:13px;font-weight:500;color:#f1f5f9}
+            .btn{padding:5px 12px;font-size:11px;border:0.5px solid #334155;border-radius:6px;background:#0f172a;color:#94a3b8;cursor:pointer;white-space:nowrap;transition:0.15s;text-decoration:none;display:inline-block}
+            .btn:hover{background:#1e293b;color:#f1f5f9}
+            .btn-blue{border-color:#1e40af;color:#93c5fd}
+            .btn-blue:hover{background:#0f172a}
+            .btn-group{display:flex;gap:4px;flex-wrap:wrap}
+            .filter-btn{padding:3px 10px;font-size:10px;border:0.5px solid;border-radius:4px;cursor:pointer;background:transparent;font-family:'Courier New',monospace;letter-spacing:0.04em}
+            .f-info{border-color:#16a34a;color:#4ade80}
+            .f-info:hover{background:#052e16}
+            .f-warning{border-color:#b45309;color:#fbbf24}
+            .f-warning:hover{background:#1c0f00}
+            .f-error{border-color:#991b1b;color:#fca5a5}
+            .f-error:hover{background:#450a0a}
+            .f-admin{border-color:#6d28d9;color:#c4b5fd}
+            .f-admin:hover{background:#1e0a3c}
+            .f-date{border-color:#0e7490;color:#67e8f9}
+            .f-date:hover{background:#001f2b}
+            .section-label{font-size:10px;letter-spacing:0.08em;color:#475569;text-transform:uppercase;margin:20px 0 8px;padding-left:2px}
+            pre{background:#1e293b;border:0.5px solid #334155;border-radius:8px;padding:14px 16px;max-height:360px;overflow-y:auto;font-family:'Courier New',monospace;font-size:11px;line-height:1.6;color:#94a3b8;white-space:pre-wrap;word-break:break-all}
+            table{width:100%;border-collapse:collapse}
+            thead tr{border-bottom:0.5px solid #334155}
+            th{font-size:10px;letter-spacing:0.06em;color:#475569;text-transform:uppercase;padding:8px 12px;text-align:left;font-weight:400}
+            td{padding:10px 12px;font-size:12px;border-bottom:0.5px solid #1e293b;vertical-align:middle}
+            tr:last-child td{border-bottom:none}
+            tr:hover td{background:#1e293b}
+            .td-name{color:#f1f5f9;font-family:'Courier New',monospace}
+            .td-muted{color:#64748b}
         </style>
     </head>
     <body>
 
-    <h1>🧾 SGNT Logs</h1>
+    <div class="topbar">
+        <div class="topbar-left">
+            <a href="/dashboard" class="btn">← Dashboard</a>
+            <span class="topbar-title">Logs</span>
+        </div>
+        <a href="/logs?download=all" class="btn btn-blue">Download all</a>
+    </div>
 
-    <a href="/logs?download=all">
-        <button class="download">📦 Download ALL logs</button>
-    </a>
+    <div class="section-label">Live preview — last {{ preview_size }} lines</div>
+    <pre>{% for line in preview %}{{ line }}{% endfor %}</pre>
 
-    <h2>🔥 Latest Log Preview (last {{ preview_size }} lines)</h2>
-    <pre>
-{% for line in preview %}
-{{ line }}
-{% endfor %}
-    </pre>
-
-    <h2>📁 Log Files</h2>
-
+    <div class="section-label">Log files</div>
     <table>
-        <tr>
-            <th>File</th>
-            <th>Size</th>
-            <th>Modified</th>
-            <th>Download</th>
-            <th>Filters</th>
-        </tr>
-
+        <thead>
+            <tr>
+                <th>File</th>
+                <th>Size</th>
+                <th>Modified</th>
+                <th>Download</th>
+                <th>Filter</th>
+            </tr>
+        </thead>
+        <tbody>
         {% for log in logs %}
         <tr>
-            <td>{{ log.name }}</td>
-            <td>{{ log.size }}</td>
-            <td>{{ log.modified }}</td>
-
+            <td class="td-name">{{ log.name }}</td>
+            <td class="td-muted">{{ log.size }}</td>
+            <td class="td-muted">{{ log.modified }}</td>
+            <td><a href="/logs?file={{ log.name }}" class="btn">Download</a></td>
             <td>
-                <a href="/logs?file={{ log.name }}">
-                    <button class="download">Download</button>
-                </a>
-            </td>
-
-            <td>
-                <a href="/logs?file={{ log.name }}&level=INFO">
-                    <button class="info">INFO</button>
-                </a>
-
-                <a href="/logs?file={{ log.name }}&level=WARNING">
-                    <button class="warning">WARNING</button>
-                </a>
-
-                <a href="/logs?file={{ log.name }}&level=ERROR">
-                    <button class="error">ERROR</button>
-                </a>
-
-                <a href="/logs?file={{ log.name }}&level=ADMIN">
-                    <button class="admin">ADMIN</button>
-                </a>
-
-                <a href="/logs?file={{ log.name }}&level=DATE">
-                    <button class="date">DATE</button>
-                </a>
-
+                <div class="btn-group">
+                    <a href="/logs?file={{ log.name }}&level=INFO"><button class="filter-btn f-info">INFO</button></a>
+                    <a href="/logs?file={{ log.name }}&level=WARNING"><button class="filter-btn f-warning">WARN</button></a>
+                    <a href="/logs?file={{ log.name }}&level=ERROR"><button class="filter-btn f-error">ERROR</button></a>
+                    <a href="/logs?file={{ log.name }}&level=ADMIN"><button class="filter-btn f-admin">ADMIN</button></a>
+                    <a href="/logs?file={{ log.name }}&level=DATE"><button class="filter-btn f-date">DATE</button></a>
+                </div>
             </td>
         </tr>
         {% endfor %}
-
+        </tbody>
     </table>
 
     </body>
     </html>
     """
-
     return render_template_string(html, logs=log_files, preview=latest_logs, preview_size=LOG_VIEW)
 
 
@@ -2019,9 +2511,22 @@ def metrics():
         return handle_unauthorized()
 
     if not SNAPSHOT_HISTORY:
-        return "No data yet"
+        return """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>SGNT Metrics</title>
+            <link rel="icon" type="image/png" href="/static/sgnticon.png">
+            <style>
+                body{background:#0f172a;color:#94a3b8;font-family:'Inter',sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;font-size:13px}
+            </style>
+        </head>
+        <body>No snapshot data yet.</body>
+        </html>
+        """
 
     return f"""
+    <!DOCTYPE html>
     <html>
     <head>
         <title>SGNT Metrics</title>
@@ -2029,57 +2534,65 @@ def metrics():
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
         <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
         <style>
-            body {{
-                background-color: #0f172a;
-                color: white;
-                font-family: 'Inter', sans-serif;
-            }}
-            canvas {{
-                background: #1e293b;
-                border-radius: 10px;
-                padding: 10px;
-                margin-bottom: 10px;
-            }}
-            button {{
-                margin-bottom: 30px;
-                margin-right: 10px;
-                padding: 8px 12px;
-                border: none;
-                border-radius: 6px;
-                background: #2563eb;
-                color: white;
-                cursor: pointer;
-            }}
-            button:hover {{
-                background: #1d4ed8;
-            }}
+            *{{box-sizing:border-box;margin:0;padding:0}}
+            body{{background:#0f172a;color:#e2e8f0;font-family:'Inter',sans-serif;padding:20px;font-size:14px}}
+            .topbar{{display:flex;justify-content:space-between;align-items:center;padding:0 0 14px;border-bottom:0.5px solid #1e293b;margin-bottom:16px}}
+            .topbar-left{{display:flex;align-items:center;gap:12px}}
+            .topbar-title{{font-size:13px;font-weight:500;color:#f1f5f9}}
+            .btn{{padding:5px 12px;font-size:11px;border:0.5px solid #334155;border-radius:6px;background:#0f172a;color:#94a3b8;cursor:pointer;white-space:nowrap;transition:0.15s;text-decoration:none;display:inline-block}}
+            .btn:hover{{background:#1e293b;color:#f1f5f9}}
+            .section-label{{font-size:10px;letter-spacing:0.08em;color:#475569;text-transform:uppercase;margin:20px 0 8px;padding-left:2px}}
+            .chart-card{{background:#1e293b;border:0.5px solid #334155;border-radius:8px;padding:16px;margin-bottom:12px}}
+            .chart-header{{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}}
+            .chart-title{{font-size:11px;letter-spacing:0.06em;color:#64748b;text-transform:uppercase}}
+            .dl-btn{{padding:3px 10px;font-size:10px;border:0.5px solid #334155;border-radius:4px;background:transparent;color:#64748b;cursor:pointer}}
+            .dl-btn:hover{{background:#0f172a;color:#94a3b8}}
         </style>
     </head>
     <body>
 
-    <h1>📊 Trading Dashboard</h1>
+    <div class="topbar">
+        <div class="topbar-left">
+            <a href="/dashboard" class="btn">← Dashboard</a>
+            <span class="topbar-title">Metrics</span>
+        </div>
+        <span style="font-size:11px;color:#475569;font-family:'Courier New',monospace">{len(SNAPSHOT_HISTORY)} snapshots</span>
+    </div>
 
-    <canvas id="balanceChart"></canvas>
-    <button onclick="downloadChart('balanceChart')">Download Balance</button>
+    <div class="chart-card">
+        <div class="chart-header">
+            <span class="chart-title">Balance</span>
+            <button class="dl-btn" onclick="downloadChart('balanceChart')">Download</button>
+        </div>
+        <canvas id="balanceChart"></canvas>
+    </div>
 
-    <canvas id="marginChart"></canvas>
-    <button onclick="downloadChart('marginChart')">Download Margin</button>
+    <div class="chart-card">
+        <div class="chart-header">
+            <span class="chart-title">Margin level</span>
+            <button class="dl-btn" onclick="downloadChart('marginChart')">Download</button>
+        </div>
+        <canvas id="marginChart"></canvas>
+    </div>
 
-    <canvas id="activityChart"></canvas>
-    <button onclick="downloadChart('activityChart')">Download Activity</button>
+    <div class="chart-card">
+        <div class="chart-header">
+            <span class="chart-title">Activity</span>
+            <button class="dl-btn" onclick="downloadChart('activityChart')">Download</button>
+        </div>
+        <canvas id="activityChart"></canvas>
+    </div>
 
     <script>
     const data = {SNAPSHOT_HISTORY};
     const SNAPSHOT_INTERVAL = {SNAPSHOT_INTERVAL};
     const labels = data.map(d => d.time);
 
+    Chart.defaults.color = '#64748b';
+    Chart.defaults.borderColor = '#1e293b';
+
     function dataset(label, key, color) {{
-        return {{
-            label: label,
-            data: data.map(d => d[key]),
-            borderColor: color,
-            tension: 0.2
-        }};
+        return {{label, data: data.map(d => d[key]), borderColor: color, backgroundColor: color + '18', tension: 0.3, pointRadius: 2, pointHoverRadius: 4, fill: false}};
     }}
 
     function downloadChart(chartId) {{
@@ -2090,103 +2603,58 @@ def metrics():
         link.click();
     }}
 
-    const balanceChart = new Chart(document.getElementById('balanceChart'), {{
-        type: 'line',
-        data: {{
-            labels,
-            datasets: [
-                dataset("Total Balance", "totalBalanceUSDC", "cyan"),
-                dataset("USDC Balance", "usdcBalance", "green"),
-                dataset("Debt", "totalDebt", "red"),
-                dataset("Borrowed", "usdcBorrowed", "orange")
-            ]
+    const commonOptions = {{
+        responsive: true,
+        plugins: {{legend: {{labels: {{font: {{size: 11}}, boxWidth: 12}}}}}},
+        scales: {{
+            x: {{ticks: {{font: {{size: 10}}, maxTicksLimit: 8}}, grid: {{color: '#1e293b'}}}},
+            y: {{ticks: {{font: {{size: 10}}}}, grid: {{color: '#1e293b'}}}}
         }}
+    }};
+
+    new Chart(document.getElementById('balanceChart'), {{
+        type: 'line',
+        data: {{labels, datasets: [
+            dataset("Total Balance", "totalBalanceUSDC", "#22d3ee"),
+            dataset("USDC Balance", "usdcBalance", "#4ade80"),
+            dataset("Debt", "totalDebt", "#f87171"),
+            dataset("Borrowed", "usdcBorrowed", "#fb923c")
+        ]}},
+        options: commonOptions
     }});
 
-    const marginChart = new Chart(document.getElementById('marginChart'), {{
+    new Chart(document.getElementById('marginChart'), {{
         type: 'line',
-        data: {{
-            labels,
-            datasets: [dataset("Margin Level", "marginLevel", "purple")]
-        }},
-        options: {{
-            scales: {{
-                y: {{ min: 0, max: 1000 }}
-            }}
-        }}
+        data: {{labels, datasets: [dataset("Margin Level", "marginLevel", "#a78bfa")]}},
+        options: {{...commonOptions, scales: {{...commonOptions.scales, y: {{min: 0, max: 1000, ticks: {{font: {{size: 10}}}}, grid: {{color: '#1e293b'}}}}}}}}
     }});
 
     const activityDatasets = [];
-    
+
     if (SNAPSHOT_INTERVAL === 1) {{
         activityDatasets.push(
-            {{
-                type: 'bar',
-                label: 'Today Longs',
-                data: data.map(d => d.longsToday),
-                backgroundColor: 'rgba(34,197,94,0.6)',
-                stack: 'daily'
-            }},
-            {{
-                type: 'bar',
-                label: 'Today Shorts',
-                data: data.map(d => d.shortsToday),
-                backgroundColor: 'rgba(239,68,68,0.6)',
-                stack: 'daily'
-            }}
+            {{type:'bar', label:'Longs Today', data: data.map(d => d.longsToday), backgroundColor:'rgba(74,222,128,0.5)', stack:'daily'}},
+            {{type:'bar', label:'Shorts Today', data: data.map(d => d.shortsToday), backgroundColor:'rgba(248,113,113,0.5)', stack:'daily'}}
         );
     }}
-    
     activityDatasets.push(
-        {{
-            type: 'line',
-            label: 'Total Longs',
-            data: data.map(d => d.totalLongs),
-            borderColor: 'green',
-            tension: 0.2,
-            yAxisID: 'y1'
-        }},
-        {{
-            type: 'line',
-            label: 'Total Shorts',
-            data: data.map(d => d.totalShorts),
-            borderColor: 'red',
-            tension: 0.2,
-            yAxisID: 'y1'
-        }},
-        {{
-            type: 'line',
-            label: 'Trades',
-            data: data.map(d => d.tradeID),
-            borderColor: 'white',
-            tension: 0.2,
-            yAxisID: 'y1'
-        }}
+        {{type:'line', label:'Total Longs', data: data.map(d => d.totalLongs), borderColor:'#4ade80', tension:0.3, pointRadius:2, yAxisID:'y1'}},
+        {{type:'line', label:'Total Shorts', data: data.map(d => d.totalShorts), borderColor:'#f87171', tension:0.3, pointRadius:2, yAxisID:'y1'}},
+        {{type:'line', label:'Trades', data: data.map(d => d.tradeId), borderColor:'#e2e8f0', tension:0.3, pointRadius:2, yAxisID:'y1'}}
     );
-    
-    const activityChart = new Chart(document.getElementById('activityChart'), {{
-        data: {{
-            labels,
-            datasets: activityDatasets
-        }},
+
+    new Chart(document.getElementById('activityChart'), {{
+        data: {{labels, datasets: activityDatasets}},
         options: {{
             responsive: true,
+            plugins: {{legend: {{labels: {{font: {{size: 11}}, boxWidth: 12}}}}}},
             scales: {{
-                y: {{
-                    beginAtZero: true,
-                    stacked: SNAPSHOT_INTERVAL === 1,
-                    title: {{ display: true, text: "Daily Activity" }}
-                }},
-                y1: {{
-                    beginAtZero: true,
-                    position: 'right',
-                    title: {{ display: true, text: "Total Metrics" }},
-                    grid: {{ drawOnChartArea: false }}
-                }}
+                x: {{ticks: {{font: {{size: 10}}, maxTicksLimit: 8}}, grid: {{color: '#1e293b'}}}},
+                y: {{beginAtZero: true, stacked: SNAPSHOT_INTERVAL === 1, ticks: {{font: {{size: 10}}}}, grid: {{color: '#1e293b'}}, title: {{display: true, text: 'Daily', font: {{size: 10}}, color: '#475569'}}}},
+                y1: {{beginAtZero: true, position: 'right', ticks: {{font: {{size: 10}}}}, grid: {{drawOnChartArea: false}}, title: {{display: true, text: 'Total', font: {{size: 10}}, color: '#475569'}}}}
             }}
         }}
     }});
-
     </script>
 
     </body>
@@ -2195,5 +2663,7 @@ def metrics():
 
 
 # ====== FLASK EXECUTION ======
+"""Starts the Flask development server on the configured port."""
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
