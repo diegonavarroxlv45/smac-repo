@@ -375,10 +375,12 @@ def get_symbol_lot(symbol):
 SNAPSHOT_HISTORY = []
 SNAPSHOT_LOCK = Lock()
 
+# --- SNAPSHOT THREADING ---
 def start_snapshot_workers():
     Thread(target=snapshot_worker, daemon=True).start()
     logger.info("🚀 Snapshot worker started")
 
+# --- SNAPSHOT MEMORY STORAGE ---
 def store_snapshot(snapshot):
     global SNAPSHOT_HISTORY
 
@@ -401,6 +403,7 @@ def store_snapshot(snapshot):
         if len(SNAPSHOT_HISTORY) > MAX_SNAPSHOTS:
             SNAPSHOT_HISTORY.pop(0)
 
+# --- AUXILIAR GET FUNCTIONS FOR SNAPSHOT ---
 def get_margin_account():
     params = {}
     acc = send_signed_request("GET", "/sapi/v1/margin/account", params)
@@ -414,6 +417,7 @@ def get_btc_usdc_price():
         logger.error(f"⚠️ BTC price fetch failed: {e}")
         raise
 
+# --- SNAPSHOT FORMATION ---
 def build_snapshot():
     acc = get_margin_account()
 
@@ -482,6 +486,7 @@ def build_snapshot():
 
     return snapshot
 
+# --- GENERAL SNAPSHOT EXECUTION ---
 def snapshot_worker():
     while True:
         try:
@@ -522,8 +527,8 @@ except Exception as e:
     raise
 
 # --- LOG DEPLOY ---
-now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-logger.info(f"🚀 Deployed at {now}")
+deploy_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+logger.info(f"🚀 Deployed at {deploy_time}")
 logger.info(f"________________________________________")
 
 
@@ -668,7 +673,7 @@ def handle_pre_trade_cleanup(symbol: str):
     base_asset = symbol.replace("USDC", "")
     logger.info(f"🔄 Cleaning previous environment for {symbol}...")
 
-    # === 1️⃣ Cancel pending orders ===
+    # --- 1️⃣ Cancel pending orders ---
     try:
         params = {
             "symbol": symbol,
@@ -683,7 +688,7 @@ def handle_pre_trade_cleanup(symbol: str):
             logger.error(f"⚠️ Couldn't cancel orders for {symbol}: {e}")
 
 
-    # === 2️⃣ Repay debt ===
+    # --- 2️⃣ Repay debt ---
     try:
         ts = _now_ms()
         q, sig = sign_params_query({"timestamp": ts}, BINANCE_API_SECRET)
@@ -744,7 +749,7 @@ def handle_pre_trade_cleanup(symbol: str):
 
                 time.sleep(3)
 
-            # === Refresh balances after buy ===
+            # --- Refresh balances after buy ---
             ts = _now_ms()
             q, sig = sign_params_query({"timestamp": ts}, BINANCE_API_SECRET)
             url = f"{BASE_URL}/sapi/v1/margin/account?{q}&signature={sig}"
@@ -755,7 +760,7 @@ def handle_pre_trade_cleanup(symbol: str):
             borrowed   = float(asset_data["borrowed"])
             free_base = float(asset_data["free"])
 
-            # === Repay only what is available ===
+            # --- Repay only what is available ---
             repay_amount = min(borrowed, free_base)
 
             if repay_amount > 0:
@@ -777,7 +782,7 @@ def handle_pre_trade_cleanup(symbol: str):
     except Exception as e:
         logger.error(f"⚠️ Error during repay in {base_asset}: {e}")
 
-    # === 3️⃣ Sell residual balance ===
+    # --- 3️⃣ Sell residual balance ---
     try:
         lot = get_symbol_lot(symbol)
 
@@ -1435,7 +1440,7 @@ def set_log_view(value=None):
         except:
             return {"status": "error", "msg": "invalid LOG_VIEW value"}
 
-        LOG_VIEW = max(0, min(value, 80))
+        LOG_VIEW = max(0, min(value, 100))
         logger.admin(f"🛠️ ADMIN ACTION: LOG_VIEW value updated → {LOG_VIEW}")
         return {"status": "ok", "log_view_value": LOG_VIEW}
 
@@ -1559,21 +1564,24 @@ ADMIN_ACTIONS = {
 ADMIN_SESSIONS = {}
 LOGIN_ATTEMPTS = {}
 
-# --- ADMIN SESSIONS ---
+# --- ADMIN IP IDENTIFICATION ---
 def get_ip():
     if request.headers.get("X-Forwarded-For"):
         return request.headers.get("X-Forwarded-For").split(",")[0].strip()
     return request.remote_addr
 
+# --- ADMIN SESSION OPENING ---
 def create_admin_session(ip):
     ADMIN_SESSIONS[ip] = time.time()
     logger.admin(f"🔓 Admin session opened for {ip}")
 
+# --- ADMIN SESSION CLOSING ---
 def destroy_admin_session(ip):
     if ip in ADMIN_SESSIONS:
         del ADMIN_SESSIONS[ip]
         logger.admin(f"🔒 Admin session closed for {ip}")
 
+# --- ADMIN SESSION EXPIRING ---
 def is_admin_authenticated():
     ip = get_ip()
 
@@ -1590,6 +1598,7 @@ def is_admin_authenticated():
     ADMIN_SESSIONS[ip] = time.time()
     return True
 
+# --- RETURNS WHEN UNAUTHORIZED ---
 def handle_unauthorized():
     if "text/html" in request.headers.get("Accept", ""):
         return redirect(url_for("login"))
@@ -1607,6 +1616,7 @@ def is_rate_limited(ip):
 
     return len(attempts) > LOGIN_LIMIT
 
+# --- CLEARING LOGIN ATTEMPTS ---
 def reset_login_attempts(ip):
     if ip in LOGIN_ATTEMPTS:
         del LOGIN_ATTEMPTS[ip]
@@ -2625,8 +2635,28 @@ def metrics():
 
     new Chart(document.getElementById('marginChart'), {{
         type: 'line',
-        data: {{labels, datasets: [dataset("Margin Level", "marginLevel", "#a78bfa")]}},
-        options: {{...commonOptions, scales: {{...commonOptions.scales, y: {{min: 0, max: 1000, ticks: {{font: {{size: 10}}}}, grid: {{color: '#1e293b'}}}}}}}}
+        data: {{
+            labels,
+            datasets: [dataset("Margin Level", "marginLevel", "#a78bfa")]
+        }},
+        options: {{
+            ...commonOptions,
+            scales: {{
+                ...commonOptions.scales,
+                y: {{
+                    type: 'logarithmic',
+                    min: 1,
+                    max: 1000,
+                    ticks: {{
+                        font: {{ size: 10 }},
+                        callback: function(value) {{
+                            return Number(value).toString();
+                        }}
+                    }},
+                    grid: {{ color: '#1e293b' }}
+                }}
+            }}
+        }}
     }});
 
     const activityDatasets = [];
