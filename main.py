@@ -13,6 +13,7 @@ import io
 import time
 import math
 import hmac
+import json
 import hashlib
 import zipfile
 import logging
@@ -242,15 +243,13 @@ def is_bot_ready():
         return True
 
     uptime = time.time() - BOOT_TIME
-    BOOT_SECS = BOOT_PERIOD * 60
-    GRACE_SECS = GRACE_PERIOD * 60
 
-    if uptime < BOOT_SECS:
-        logger.info(f"⏳ Boot protection active ({int(uptime)}s/{BOOT_SECS}s)")
+    if uptime < (BOOT_PERIOD * 60):
+        logger.info(f"⏳ Boot protection active ({int(uptime)}s/{BOOT_PERIOD * 60}s)")
         return False
 
-    if uptime < GRACE_SECS:
-        logger.info(f"🟡 Deploy grace period ({int(uptime)}s/{GRACE_SECS}s)")
+    if uptime < (GRACE_PERIOD * 60):
+        logger.info(f"🟡 Deploy grace period ({int(uptime)}s/{GRACE_PERIOD * 60}s)")
         return False
 
     if not health_check_cached():
@@ -265,12 +264,7 @@ def is_bot_ready():
 def trading_guard():
     if not is_bot_ready():
         return False, (
-            jsonify({
-                "status": "booting_or_unhealthy",
-                "trading": TRADING
-            }),
-            200
-        )
+            jsonify({"status": "booting_or_unhealthy", "trading": TRADING}), 200)
 
     return True, None
 
@@ -364,172 +358,10 @@ def get_symbol_lot(symbol):
                 "minQty": float(fs.get("minQty", 0.0)),
                 "tickSize_str": ts["tickSize"],
                 "tickSize": float(ts["tickSize"]),
-                "minNotional": minNotional,}
+                "minNotional": minNotional
+            }
 
     raise Exception(f"❌ Symbol not found: {symbol}")
-
-
-# ====== SNAPSHOT METRICS ======
-"""Periodic account snapshots stored in memory for the metrics dashboard: balance, margin level, debt, and trade activity."""
-
-SNAPSHOT_HISTORY = []
-SNAPSHOT_LOCK = Lock()
-
-# --- SNAPSHOT THREADING ---
-def start_snapshot_workers():
-    Thread(target=snapshot_worker, daemon=True).start()
-    logger.info("🚀 Snapshot worker started")
-
-# --- SNAPSHOT MEMORY STORAGE ---
-def store_snapshot(snapshot):
-    global SNAPSHOT_HISTORY
-
-    with SNAPSHOT_LOCK:
-        clean_snapshot = {
-            "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-            "totalBalanceUSDC": snapshot["totalBalanceUSDC"],
-            "marginLevel": snapshot["marginLevel"],
-            "totalDebt": snapshot["totalDebt"],
-            "usdcBalance": snapshot["usdcBalance"],
-            "usdcBorrowed": snapshot["usdcBorrowed"],
-            "longsToday": snapshot["longsToday"],
-            "shortsToday": snapshot["shortsToday"],
-            "totalLongs": snapshot["totalLongs"],
-            "totalShorts": snapshot["totalShorts"]
-        }
-
-        SNAPSHOT_HISTORY.append(clean_snapshot)
-
-        if len(SNAPSHOT_HISTORY) > MAX_SNAPSHOTS:
-            SNAPSHOT_HISTORY.pop(0)
-
-# --- AUXILIAR GET FUNCTIONS FOR SNAPSHOT ---
-def get_margin_account():
-    params = {}
-    acc = send_signed_request("GET", "/sapi/v1/margin/account", params)
-    return acc
-
-def get_btc_usdc_price():
-    try:
-        r = _request_with_retries("GET", f"{BASE_URL}/api/v3/ticker/price", params={"symbol": "BTCUSDC"})
-        return float(r["price"])
-    except Exception as e:
-        logger.error(f"⚠️ BTC price fetch failed: {e}")
-        raise
-
-# --- SNAPSHOT FORMATION ---
-def build_snapshot():
-    acc = get_margin_account()
-
-    total_debt = 0.0
-    usdc_balance = 0.0
-    usdc_borrowed = 0.0
-    assets_with_balance = []
-
-    for asset in acc["userAssets"]:
-        borrowed = float(asset["borrowed"])
-        free = float(asset["free"])
-        locked = float(asset["locked"])
-        total_debt += borrowed
-        total_asset_balance = free + locked
-
-        if total_asset_balance > 0 and asset["asset"] != "USDC":
-            assets_with_balance.append({
-                "asset": asset["asset"],
-                "balance": round(total_asset_balance, 8)
-            })
-
-        if asset["asset"] == "USDC":
-            usdc_balance = free + locked
-            usdc_borrowed = borrowed
-
-    btc_usdc_price = get_btc_usdc_price()
-    total_balance_usdc = float(acc["totalNetAssetOfBtc"]) * btc_usdc_price
-    margin_level = float(acc["marginLevel"])
-
-    snapshot = {
-        "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-
-        # 💰 BALANCE
-        "totalBalanceUSDC": round(total_balance_usdc, 8),
-        "usdcBalance": round(usdc_balance, 8),
-        "totalDebt": round(total_debt, 8),
-        "usdcBorrowed": round(usdc_borrowed, 8),
-        "assetsWithBalance": assets_with_balance,
-
-        # ⚖️ RISK
-        "marginLevel": margin_level,
-
-        # 📈 ACTIVITY
-        "longsToday": DAILY_LONGS,
-        "shortsToday": DAILY_SHORTS,
-        "totalLongs": TOTAL_LONGS,
-        "totalShorts": TOTAL_SHORTS,
-        "tradeId": TRADE_COUNTER,
-    }
-
-    snapshot["variables"] = {
-        "trading": TRADING,
-        "testnet": TESTNET,
-        "sl_override": SL_OVERRIDE,
-        "tp_override": TP_OVERRIDE,
-        "sl_pct": SL_PCT,
-        "tp_pct": TP_PCT,
-        "retries": RETRIES,
-        "snapshot_interval": SNAPSHOT_INTERVAL,
-        "max_snapshots": MAX_SNAPSHOTS,
-        "log_view": LOG_VIEW,
-        "login_limit": LOGIN_LIMIT,
-        "login_retry": LOGIN_RETRY,
-        "session_timeout": SESSION_TIMEOUT,
-    }
-
-    return snapshot
-
-# --- GENERAL SNAPSHOT EXECUTION ---
-def snapshot_worker():
-    while True:
-        try:
-            snapshot = build_snapshot()
-            store_snapshot(snapshot)
-            logger.info("📸 Snapshot stored")
-        except Exception as e:
-            logger.error(f"⚠️ Snapshot error: {e}")
-        finally:
-            logger.info(f"⏱ Next snapshot in {SNAPSHOT_INTERVAL} day(s)")
-            time.sleep(SNAPSHOT_INTERVAL * 86400)
-
-try:
-    start_snapshot_workers()
-except Exception as e:
-    logger.error(f"❌ Error starting snapshot workers: {e}")
-    raise
-
-
-# ====== DEPLOY LOADING ======
-"""Loads Binance exchange info on startup and logs the deploy timestamp."""
-
-# --- EXCHANGE INFO ---
-EXCHANGE_INFO = None
-
-# --- LOAD EXCANGE INFO ---
-def load_exchange_info():
-    global EXCHANGE_INFO
-
-    logger.info("📡 Loading exchange info...")
-    EXCHANGE_INFO = send_public_request("GET", "/api/v3/exchangeInfo")
-    logger.info("✅ Exchange info loaded")
-
-try:
-    load_exchange_info()
-except Exception as e:
-    logger.error(f"❌ Error loading exchange info: {e}")
-    raise
-
-# --- LOG DEPLOY ---
-deploy_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-logger.info(f"🚀 Deployed at {deploy_time}")
-logger.info(f"________________________________________")
 
 
 # ====== TRADE COUNTER ======
@@ -554,8 +386,7 @@ def check_daily_summary():
 
         if total_trades > 0:
             logger.date(
-                f"📅 Day {CURRENT_DAY} completed! "
-                f"Trades: {total_trades} "
+                f"📅 Day {CURRENT_DAY} completed! Trades: {total_trades} "
                 f"(Longs: {DAILY_LONGS} | Shorts: {DAILY_SHORTS})"
             )
             logger.date(f"________________________________________")
@@ -675,10 +506,7 @@ def handle_pre_trade_cleanup(symbol: str):
 
     # --- 1️⃣ Cancel pending orders ---
     try:
-        params = {
-            "symbol": symbol,
-            "timestamp": _now_ms()}
-
+        params = {"symbol": symbol, "timestamp": _now_ms()}
         send_signed_request("DELETE", "/sapi/v1/margin/openOrders", params)
         logger.info(f"🧹 Pending orders for {symbol} canceled")
     except Exception as e:
@@ -904,8 +732,7 @@ def borrowing(raw_qty, lot, price_est, symbol):
     borrow_params = {
         "asset": symbol.replace("USDC", ""),
         "amount": format(Decimal(str(borrow_amount)), "f"),
-        "timestamp": _now_ms()
-    }
+        "timestamp": _now_ms()}
 
     borrow_resp = send_signed_request("POST", "/sapi/v1/margin/loan", borrow_params)
     time.sleep(0.3)
@@ -913,8 +740,7 @@ def borrowing(raw_qty, lot, price_est, symbol):
     borrowed_qty = float(
         borrow_resp.get("amount") or
         borrow_resp.get("qty") or
-        borrow_amount
-    )
+        borrow_amount)
 
     logger.info(f"📥 Borrowed {borrowed_qty} {symbol.replace('USDC','')}")
     qty_str = floor_to_step_str(borrowed_qty, lot["stepSize_str"])
@@ -965,16 +791,7 @@ def handle_post_trade(symbol, side, resp, lot, webhook_data, trade_id):
             sl_from_web = webhook_data.get("sl")
             tp_from_web = webhook_data.get("tp")
 
-        place_sl_tp_margin(
-            symbol,
-            side,
-            entry_price,
-            executed_qty,
-            lot,
-            sl_override=sl_from_web,
-            tp_override=tp_from_web,
-            trade_id=trade_id
-        )
+        place_sl_tp_margin(symbol, side, entry_price, executed_qty, lot, sl_override=sl_from_web, tp_override=tp_from_web, trade_id=trade_id)
 
     if executed_qty > 0:
         update_last_trade(symbol, side)
@@ -988,8 +805,7 @@ def update_last_trade(symbol: str, side: str):
     LAST_TRADE = {
         "symbol": symbol,
         "side": side,
-        "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-    }
+        "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")}
 
 
 # ====== SL/TP FUNCTIONS ======
@@ -1096,8 +912,8 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
                 "stopPrice": sl_price_str,
                 "stopLimitPrice": stop_limit_price,
                 "stopLimitTimeInForce": "GTC",
-                "timestamp": _now_ms()
-            }
+                "timestamp": _now_ms()}
+
             try:
                 send_signed_request("POST", "/sapi/v1/margin/order/oco", params)
                 direction = 1 if side == "BUY" else -1
@@ -1124,8 +940,8 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
                 "price": stop_limit_price,
                 "stopPrice": sl_price_str,
                 "timeInForce": "GTC",
-                "timestamp": _now_ms()
-            }
+                "timestamp": _now_ms()}
+
             send_signed_request("POST", "/sapi/v1/margin/order", params)
             logger.info(f"[TRADE {trade_id}] 🛑 SL placed for {symbol}: stop={sl_price_str}, limit={stop_limit_price}, qty={qty_str}")
             return True
@@ -1139,8 +955,8 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
                 "quantity": qty_str,
                 "price": tp_price_str,
                 "timeInForce": "GTC",
-                "timestamp": _now_ms()
-            }
+                "timestamp": _now_ms()}
+
             send_signed_request("POST", "/sapi/v1/margin/order", params)
             logger.info(f"[TRADE {trade_id}] 🎯 TP placed for {symbol}: price={tp_price_str}, qty={qty_str}")
             return True
@@ -1148,6 +964,166 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
     except Exception as e:
         logger.error(f"⚠️ Could not place SL/TP for {symbol}: {e}")
         return False
+
+
+# ====== DEPLOY LOADING ======
+"""Loads Binance exchange info on startup and logs the deploy timestamp."""
+
+# --- EXCHANGE INFO ---
+EXCHANGE_INFO = None
+
+# --- LOAD EXCANGE INFO ---
+def load_exchange_info():
+    global EXCHANGE_INFO
+
+    logger.info("📡 Loading exchange info...")
+    EXCHANGE_INFO = send_public_request("GET", "/api/v3/exchangeInfo")
+    logger.info("✅ Exchange info loaded")
+
+try:
+    load_exchange_info()
+except Exception as e:
+    logger.error(f"❌ Error loading exchange info: {e}")
+    raise
+
+# --- LOG DEPLOY ---
+deploy_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+logger.info(f"🚀 Deployed at {deploy_time}")
+logger.info(f"________________________________________")
+
+
+# ====== SNAPSHOT METRICS ======
+"""Periodic account snapshots stored in memory for the metrics dashboard: balance, margin level, debt, and trade activity."""
+
+SNAPSHOT_HISTORY = []
+SNAPSHOT_LOCK = Lock()
+
+# --- SNAPSHOT THREADING ---
+def start_snapshot_workers():
+    Thread(target=snapshot_worker, daemon=True).start()
+    logger.info("🚀 Snapshot worker started")
+
+# --- SNAPSHOT MEMORY STORAGE ---
+def store_snapshot(snapshot):
+    global SNAPSHOT_HISTORY
+
+    with SNAPSHOT_LOCK:
+        clean_snapshot = {
+            "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            "totalBalanceUSDC": snapshot["totalBalanceUSDC"],
+            "marginLevel": snapshot["marginLevel"],
+            "totalDebt": snapshot["totalDebt"],
+            "usdcBalance": snapshot["usdcBalance"],
+            "usdcBorrowed": snapshot["usdcBorrowed"],
+            "longsToday": snapshot["longsToday"],
+            "shortsToday": snapshot["shortsToday"],
+            "totalLongs": snapshot["totalLongs"],
+            "totalShorts": snapshot["totalShorts"]
+        }
+
+        SNAPSHOT_HISTORY.append(clean_snapshot)
+
+        if len(SNAPSHOT_HISTORY) > MAX_SNAPSHOTS:
+            SNAPSHOT_HISTORY.pop(0)
+
+# --- AUXILIAR GET FUNCTIONS FOR SNAPSHOT ---
+def get_margin_account():
+    params = {}
+    acc = send_signed_request("GET", "/sapi/v1/margin/account", params)
+    return acc
+
+def get_btc_usdc_price():
+    try:
+        r = _request_with_retries("GET", f"{BASE_URL}/api/v3/ticker/price", params={"symbol": "BTCUSDC"})
+        return float(r["price"])
+    except Exception as e:
+        logger.error(f"⚠️ BTC price fetch failed: {e}")
+        raise
+
+# --- SNAPSHOT FORMATION ---
+def build_snapshot():
+    acc = get_margin_account()
+
+    total_debt = 0.0
+    usdc_balance = 0.0
+    usdc_borrowed = 0.0
+    assets_with_balance = []
+
+    for asset in acc["userAssets"]:
+        borrowed = float(asset["borrowed"])
+        free = float(asset["free"])
+        locked = float(asset["locked"])
+        total_debt += borrowed
+        total_asset_balance = free + locked
+
+        if total_asset_balance > 0 and asset["asset"] != "USDC":
+            assets_with_balance.append({"asset": asset["asset"], "balance": round(total_asset_balance, 8)})
+
+        if asset["asset"] == "USDC":
+            usdc_balance = free + locked
+            usdc_borrowed = borrowed
+
+    btc_usdc_price = get_btc_usdc_price()
+    total_balance_usdc = float(acc["totalNetAssetOfBtc"]) * btc_usdc_price
+    margin_level = float(acc["marginLevel"])
+
+    snapshot = {
+        "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+
+        # 💰 BALANCE
+        "totalBalanceUSDC": round(total_balance_usdc, 8),
+        "usdcBalance": round(usdc_balance, 8),
+        "totalDebt": round(total_debt, 8),
+        "usdcBorrowed": round(usdc_borrowed, 8),
+        "assetsWithBalance": assets_with_balance,
+
+        # ⚖️ RISK
+        "marginLevel": margin_level,
+
+        # 📈 ACTIVITY
+        "longsToday": DAILY_LONGS,
+        "shortsToday": DAILY_SHORTS,
+        "totalLongs": TOTAL_LONGS,
+        "totalShorts": TOTAL_SHORTS,
+        "tradeId": TRADE_COUNTER
+    }
+
+    snapshot["variables"] = {
+        "trading": TRADING,
+        "testnet": TESTNET,
+        "sl_override": SL_OVERRIDE,
+        "tp_override": TP_OVERRIDE,
+        "sl_pct": SL_PCT,
+        "tp_pct": TP_PCT,
+        "retries": RETRIES,
+        "snapshot_interval": SNAPSHOT_INTERVAL,
+        "max_snapshots": MAX_SNAPSHOTS,
+        "log_view": LOG_VIEW,
+        "login_limit": LOGIN_LIMIT,
+        "login_retry": LOGIN_RETRY,
+        "session_timeout": SESSION_TIMEOUT
+    }
+
+    return snapshot
+
+# --- GENERAL SNAPSHOT EXECUTION ---
+def snapshot_worker():
+    while True:
+        try:
+            snapshot = build_snapshot()
+            store_snapshot(snapshot)
+            logger.info("📸 Snapshot stored")
+        except Exception as e:
+            logger.error(f"⚠️ Snapshot error: {e}")
+        finally:
+            logger.info(f"⏱ Next snapshot in {SNAPSHOT_INTERVAL} day(s)")
+            time.sleep(SNAPSHOT_INTERVAL * 86400)
+
+try:
+    start_snapshot_workers()
+except Exception as e:
+    logger.error(f"❌ Error starting snapshot workers: {e}")
+    raise
 
 
 # ====== MILESTONES ======
@@ -1165,10 +1141,8 @@ def check_milestones(total_balance_usdc: float):
             new_milestones.append(milestone)
 
             logger.info(
-                f"🎉🎉 CONGRATS! 🎉🎉\n"
-                f"💰 You reached {milestone:,.0f} USDC\n"
-                f"🚀 Keep it up. Compounding is working.\n"
-                f"🔥 Discipline > Luck\n"
+                f"🎉🎉 CONGRATS! You reached {milestone:,.0f} USDC 🎉🎉 \n"
+                f"🚀 Keep it up. Compounding is working. Discipline > Luck\n"
             )
 
     return new_milestones
@@ -1187,9 +1161,10 @@ def sanitize_payload(payload: dict) -> dict:
     return clean
 
 
-# ====== ADMIN FUNCTIONS ======
+# ====== ADMINISTRATIVE ======
 """Administrative operations: clear positions, read account snapshot, borrow/repay USDC, toggle trading parameters, and restore defaults."""
 
+# --- ADMIN FUNCTIONS ---
 def clear(symbol=None):
     if symbol:
         logger.admin(f"🔁 ADMIN ACTION: Converting {symbol} to USDC...")
@@ -1230,6 +1205,11 @@ def clear(symbol=None):
     logger.admin("✅ CLEAR completed")
     return {"cleared": cleared_symbols, "failed": failed_symbols}
 
+def plural(value, singular, plural=None):
+    if plural is None:
+        plural = singular + "s"
+    return singular if value == 1 else plural
+
 def read():
     logger.admin("📊 ADMIN ACTION: Reading Cross Margin account snapshot...")
     snapshot = build_snapshot()
@@ -1242,12 +1222,12 @@ def read():
     logger.admin(f"├─ 🟢 Take Profit Value    : {TP_PCT} %")
     logger.admin(f"├─ 🔄 Retries Value        : {RETRIES}")
     logger.admin("────────── 📊 ADMIN VARIABLES 📊 ──────────")
-    logger.admin(f"├─ 📸 Snapshot Interval    : Every {SNAPSHOT_INTERVAL} day(s)")
-    logger.admin(f"├─ 💾 Max Snapshot Storage : {MAX_SNAPSHOTS} snapshots")
-    logger.admin(f"├─ 📠 Log Preview Amount   : {LOG_VIEW} log(s)")
-    logger.admin(f"├─ 🔑 Login Attempt Limit  : {LOGIN_LIMIT} attempt(s)")
-    logger.admin(f"├─ ⏱ Login Retry Period   : {LOGIN_RETRY} minute(s)")
-    logger.admin(f"├─ ⏳ Admin Session Timeout : {SESSION_TIMEOUT} minute(s)")
+    logger.admin(f"├─ 📸 Snapshot Interval    : Every {SNAPSHOT_INTERVAL} {plural(SNAPSHOT_INTERVAL, 'day')}")
+    logger.admin(f"├─ 💾 Max Snapshot Storage : {MAX_SNAPSHOTS} {plural(MAX_SNAPSHOTS, 'snapshot')}")
+    logger.admin(f"├─ 📠 Log Preview Amount   : {LOG_VIEW} {plural(LOG_VIEW, 'log')}")
+    logger.admin(f"├─ 🔑 Login Attempt Limit  : {LOGIN_LIMIT} {plural(LOGIN_LIMIT, 'attempt')}")
+    logger.admin(f"├─ ⏱ Login Retry Period   : {LOGIN_RETRY} {plural(LOGIN_RETRY, 'minute')}")
+    logger.admin(f"├─ ⏳ Admin Session Timeout : {SESSION_TIMEOUT} {plural(SESSION_TIMEOUT, 'minute')}")
     logger.admin("────────── 📊 TRADING STATUS 📊 ──────────")
     logger.admin(f"├─ 📢 Last Trade ID        : Trade No. {snapshot['tradeId']}")
     logger.admin(f"├─ 📈 Longs Today          : {snapshot['longsToday']}")
@@ -1532,13 +1512,11 @@ def restore():
         "LOG_VIEW": LOG_VIEW,
         "LOGIN_LIMIT": LOGIN_LIMIT,
         "LOGIN_RETRY": LOGIN_RETRY,
-        "SESSION_TIMEOUT": SESSION_TIMEOUT,
+        "SESSION_TIMEOUT": SESSION_TIMEOUT
     }
 
 
-# ====== ADMIN ACTIONS ======
-"""Registry mapping admin action names to their handler functions."""
-
+# --- ADMIN ACTIONS ---
 ADMIN_ACTIONS = {
     "CLEAR": clear,
     "READ": read,
@@ -1553,7 +1531,7 @@ ADMIN_ACTIONS = {
     "LOGIN_LIMIT": set_login_limit,
     "LOGIN_RETRY": set_login_retry,
     "SESSION_TIMEOUT": set_session_timeout,
-    "RESTORE": restore,
+    "RESTORE": restore
 }
 
 
@@ -1885,6 +1863,39 @@ def admin_snapshot():
     return jsonify(snapshot), 200
 
 
+@app.route("/logs_preview")
+def logs_preview():
+    if not is_admin_authenticated():
+        return jsonify({"error": "unauthorized"}), 403
+
+    log_files = sorted(
+        [f for f in os.listdir(".") if f.endswith(".log") and os.path.isfile(f)],
+        key=os.path.getmtime,
+        reverse=True
+    )
+
+    if not log_files or LOG_VIEW == 0:
+        return jsonify({"lines": []})
+
+    with open(log_files[0], "r", encoding="utf-8") as f:
+        lines = list(deque(f, maxlen=LOG_VIEW))
+
+    return jsonify({"lines": lines})
+
+
+@app.template_filter('log_class')
+def log_class_filter(line):
+    if '| ERROR |' in line:
+        return 'log-line log-error'
+    if '| WARNING |' in line:
+        return 'log-line log-warning'
+    if '| ADMIN |' in line:
+        return 'log-line log-admin'
+    if '| DATE |' in line:
+        return 'log-line log-date'
+    return 'log-line'
+
+
 # --- FRONTEND ENDPOINTS ---
 @app.route("/")
 def index():
@@ -1897,19 +1908,42 @@ def index():
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
         <style>
             *{box-sizing:border-box;margin:0;padding:0}
-            body{background:#0f172a;color:#e2e8f0;font-family:'Inter',sans-serif;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px 20px}
+            body{background:#0f172a;color:#e2e8f0;font-family:'Inter',sans-serif;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px 20px;transition:background 0.2s,color 0.2s}
+            body.light{background:#f8fafc;color:#0f172a}
+
+            .topbar{position:fixed;top:20px;right:20px}
+            .theme-toggle{background:none;border:0.5px solid #334155;border-radius:20px;padding:4px 10px;cursor:pointer;font-size:13px;color:#94a3b8;transition:0.15s;display:flex;align-items:center;gap:6px}
+            body.light .theme-toggle{border-color:#cbd5e1;color:#64748b}
+            .theme-toggle:hover{background:#1e293b}
+            body.light .theme-toggle:hover{background:#e2e8f0}
+
             .logo{width:180px;margin-bottom:32px;opacity:0.95}
             .tagline{font-size:12px;letter-spacing:0.12em;color:#475569;text-transform:uppercase;margin-bottom:48px;font-family:'Courier New',monospace}
+
             .cards{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;width:100%;max-width:540px;margin-bottom:40px}
             .card{background:#1e293b;border:0.5px solid #334155;border-radius:8px;padding:16px;text-align:center}
+            body.light .card{background:#ffffff;border-color:#e2e8f0}
+
             .card-val{font-size:11px;font-family:'Courier New',monospace;color:#94a3b8;margin-bottom:4px}
+            body.light .card-val{color:#475569}
+
             .card-label{font-size:10px;letter-spacing:0.06em;color:#475569;text-transform:uppercase}
+
             .btn-login{padding:10px 32px;font-size:12px;letter-spacing:0.06em;border:0.5px solid #334155;border-radius:6px;background:transparent;color:#94a3b8;cursor:pointer;text-decoration:none;transition:0.15s;font-family:'Inter',sans-serif;text-transform:uppercase}
+            body.light .btn-login{border-color:#cbd5e1;color:#64748b}
             .btn-login:hover{background:#1e293b;color:#f1f5f9;border-color:#64748b}
+            body.light .btn-login:hover{background:#e2e8f0;color:#0f172a}
+
             .footer{position:fixed;bottom:20px;font-size:10px;color:#1e293b;letter-spacing:0.08em;font-family:'Courier New',monospace}
+            body.light .footer{color:#94a3b8}
         </style>
     </head>
     <body>
+
+        <div class="topbar">
+            <button class="theme-toggle" onclick="toggleTheme()" id="theme-btn">🌙</button>
+        </div>
+
         <img src="/static/sgntlogo.png" class="logo" alt="SGNT">
         <div class="tagline">Automated margin trading system</div>
 
@@ -1933,6 +1967,17 @@ def index():
         <div class="footer">SGNT · Autonomous trading infrastructure</div>
 
         <script>
+            function toggleTheme() {
+                const light = document.body.classList.toggle('light');
+                document.getElementById('theme-btn').textContent = light ? '☀️' : '🌙';
+                localStorage.setItem('sgnt-theme', light ? 'light' : 'dark');
+            }
+
+            if (localStorage.getItem('sgnt-theme') === 'light') {
+                document.body.classList.add('light');
+                document.getElementById('theme-btn').textContent = '☀️';
+            }
+
             async function loadHealth() {
                 try {
                     const r = await fetch('/health');
@@ -1950,9 +1995,11 @@ def index():
                     document.getElementById('status').style.color = '#f87171';
                 }
             }
+
             loadHealth();
             setInterval(loadHealth, 30000);
         </script>
+
     </body>
     </html>
     """
@@ -2009,25 +2056,50 @@ def login():
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
         <style>
             *{box-sizing:border-box;margin:0;padding:0}
-            body{background:#0f172a;color:#e2e8f0;font-family:'Inter',sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center}
+            body{background:#0f172a;color:#e2e8f0;font-family:'Inter',sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;transition:background 0.2s,color 0.2s}
+            body.light{background:#f8fafc;color:#0f172a}
+
+            .topbar{position:fixed;top:20px;right:20px}
+            .theme-toggle{background:none;border:0.5px solid #334155;border-radius:20px;padding:4px 10px;cursor:pointer;font-size:13px;color:#94a3b8;transition:0.15s}
+            body.light .theme-toggle{border-color:#cbd5e1;color:#64748b}
+            .theme-toggle:hover{background:#1e293b}
+            body.light .theme-toggle:hover{background:#e2e8f0}
+
             .box{width:300px;text-align:center}
             .icon{width:48px;margin:0 auto 20px;display:block}
             .title{font-size:13px;font-weight:500;color:#f1f5f9;margin-bottom:4px;letter-spacing:0.02em}
+            body.light .title{color:#0f172a}
+
             .subtitle{font-size:11px;color:#475569;margin-bottom:28px;font-family:'Courier New',monospace;letter-spacing:0.06em}
+
             .input-wrap{position:relative;margin-bottom:10px}
             input[type=password]{width:100%;padding:10px 14px;background:#1e293b;border:0.5px solid #334155;border-radius:6px;color:#f1f5f9;font-size:13px;font-family:'Inter',sans-serif;outline:none;transition:border-color 0.15s}
+            body.light input[type=password]{background:#ffffff;border-color:#cbd5e1;color:#0f172a}
+
             input[type=password]:focus{border-color:#64748b}
             input[type=password]::placeholder{color:#475569}
+
             .btn{width:100%;padding:10px;background:transparent;border:0.5px solid #334155;border-radius:6px;color:#94a3b8;font-size:12px;letter-spacing:0.06em;text-transform:uppercase;cursor:pointer;transition:0.15s;font-family:'Inter',sans-serif;margin-top:4px}
+            body.light .btn{border-color:#cbd5e1;color:#64748b}
+
             .btn:hover{background:#1e293b;color:#f1f5f9;border-color:#64748b}
+            body.light .btn:hover{background:#e2e8f0;color:#0f172a}
+
             .error{font-size:11px;color:#f87171;margin-top:14px;font-family:'Courier New',monospace}
+
             .back{display:block;margin-top:20px;font-size:11px;color:#334155;text-decoration:none;letter-spacing:0.04em}
+            body.light .back{color:#64748b}
             .back:hover{color:#64748b}
         </style>
     </head>
     <body>
+
+        <div class="topbar">
+            <button class="theme-toggle" onclick="toggleTheme()" id="theme-btn">🌙</button>
+        </div>
+
         <div class="box">
-            <img src="/static/sgnticon.png" class="icon" alt="SGNT">
+            <img src="/static/sgnticon.png" class="icon" alt="SGNT" onclick="window.location.href='/'" style="cursor: pointer; width: 150px;">
             <div class="title">SGNT</div>
             <div class="subtitle">Admin access</div>
 
@@ -2043,6 +2115,20 @@ def login():
 
             <a href="/" class="back">← Back</a>
         </div>
+
+        <script>
+            function toggleTheme() {
+                const light = document.body.classList.toggle('light');
+                document.getElementById('theme-btn').textContent = light ? '☀️' : '🌙';
+                localStorage.setItem('sgnt-theme', light ? 'light' : 'dark');
+            }
+
+            if (localStorage.getItem('sgnt-theme') === 'light') {
+                document.body.classList.add('light');
+                document.getElementById('theme-btn').textContent = '☀️';
+            }
+        </script>
+
     </body>
     </html>
     """
@@ -2063,41 +2149,64 @@ def dashboard():
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
         <style>
             *{box-sizing:border-box;margin:0;padding:0}
-            body{background:#0f172a;color:#e2e8f0;font-family:'Inter',sans-serif;padding:20px;font-size:14px}
+            body{background:#0f172a;color:#e2e8f0;font-family:'Inter',sans-serif;padding:20px;font-size:14px;transition:background 0.2s,color 0.2s}
+            body.light{background:#f8fafc;color:#0f172a}
             .topbar{display:flex;justify-content:space-between;align-items:center;padding:0 0 14px;border-bottom:0.5px solid #1e293b;margin-bottom:4px}
+            body.light .topbar{border-bottom-color:#e2e8f0}
             .topbar-left{display:flex;align-items:center;gap:10px}
+            .topbar-right{display:flex;align-items:center;gap:8px}
             .dot{width:8px;height:8px;border-radius:50%;background:#1D9E75;display:inline-block}
             .dot.red{background:#E24B4A}
             .status-text{font-size:11px;color:#94a3b8;font-family:'Courier New',monospace}
+            body.light .status-text{color:#64748b}
             .tag{font-size:10px;padding:2px 8px;border-radius:6px;border:0.5px solid;font-family:'Courier New',monospace}
             .tag-live{border-color:#1D9E75;color:#1D9E75}
             .tag-testnet{border-color:#BA7517;color:#BA7517}
+            .theme-toggle{background:none;border:0.5px solid #334155;border-radius:20px;padding:4px 10px;cursor:pointer;font-size:13px;color:#94a3b8;transition:0.15s;display:flex;align-items:center;gap:6px}
+            body.light .theme-toggle{border-color:#cbd5e1;color:#64748b}
+            .theme-toggle:hover{background:#1e293b}
+            body.light .theme-toggle:hover{background:#e2e8f0}
             .db{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;padding:12px 0}
             .card{background:#1e293b;border:0.5px solid #334155;border-radius:8px;padding:14px 16px}
+            body.light .card{background:#ffffff;border-color:#e2e8f0}
             .card-title{font-size:10px;letter-spacing:0.08em;color:#64748b;text-transform:uppercase;margin-bottom:10px;border-bottom:0.5px solid #334155;padding-bottom:6px}
+            body.light .card-title{border-bottom-color:#e2e8f0}
             .metric-big{font-size:22px;font-weight:500;color:#f1f5f9;font-family:'Courier New',monospace}
+            body.light .metric-big{color:#0f172a}
             .metric-label{font-size:11px;color:#64748b;margin-top:2px}
             .metric-row{display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:0.5px solid #1e293b;font-size:12px}
+            body.light .metric-row{border-bottom-color:#e2e8f0}
             .metric-row:last-child{border-bottom:none}
             .metric-row .k{color:#94a3b8}
+            body.light .metric-row .k{color:#64748b}
             .metric-row .v{color:#f1f5f9;font-weight:500;font-family:'Courier New',monospace}
+            body.light .metric-row .v{color:#0f172a}
             .toggle-row{display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:0.5px solid #1e293b}
+            body.light .toggle-row{border-bottom-color:#e2e8f0}
             .toggle-row:last-child{border-bottom:none}
             .toggle-label{font-size:12px;color:#94a3b8}
+            body.light .toggle-label{color:#64748b}
             .toggle{position:relative;width:34px;height:18px;cursor:pointer}
             .toggle input{opacity:0;width:0;height:0}
             .slider{position:absolute;inset:0;background:#334155;border-radius:18px;transition:0.2s}
             .slider:before{content:'';position:absolute;width:12px;height:12px;left:3px;top:3px;background:#94a3b8;border-radius:50%;transition:0.2s}
             input:checked+.slider{background:#1D9E75}
             input:checked+.slider:before{transform:translateX(16px);background:white}
-            .input-row{display:flex;gap:6px;margin-top:6px;align-items:center}
-            .input-row input[type=number],.input-row input[type=text]{flex:1;padding:5px 8px;font-size:12px;background:#0f172a;border:0.5px solid #334155;border-radius:6px;color:#f1f5f9;font-family:'Courier New',monospace}
+            .input-row{display:flex;gap:4px;margin-top:6px;align-items:center;flex-wrap:wrap}
+            .input-row input[type=number],.input-row input[type=text]{flex:1;min-width:60px;padding:5px 8px;font-size:12px;background:#0f172a;border:0.5px solid #334155;border-radius:6px;color:#f1f5f9;font-family:'Courier New',monospace}
+            body.light .input-row input[type=number],body.light .input-row input[type=text]{background:#f8fafc;border-color:#cbd5e1;color:#0f172a}
             .btn{padding:5px 12px;font-size:11px;border:0.5px solid #334155;border-radius:6px;background:#0f172a;color:#94a3b8;cursor:pointer;white-space:nowrap;transition:0.15s}
+            body.light .btn{background:#f8fafc;border-color:#cbd5e1;color:#64748b}
             .btn:hover{background:#1e293b;color:#f1f5f9}
+            body.light .btn:hover{background:#e2e8f0;color:#0f172a}
             .btn-danger{border-color:#7f1d1d;color:#fca5a5}
             .btn-danger:hover{background:#450a0a}
             .btn-success{border-color:#14532d;color:#86efac}
             .btn-success:hover{background:#052e16}
+            .btn-minmax{padding:3px 7px;font-size:10px;border:0.5px solid #334155;border-radius:4px;background:transparent;color:#475569;cursor:pointer;font-family:'Courier New',monospace;transition:0.15s}
+            .btn-minmax:hover{background:#1e293b;color:#94a3b8}
+            body.light .btn-minmax{border-color:#cbd5e1;color:#94a3b8}
+            body.light .btn-minmax:hover{background:#e2e8f0}
             .col-full{grid-column:1/-1}
             .col-2{grid-column:span 2}
             .section-label{font-size:10px;letter-spacing:0.08em;color:#475569;text-transform:uppercase;margin:10px 0 4px;grid-column:1/-1;padding-left:2px}
@@ -2105,18 +2214,38 @@ def dashboard():
             .margin-bar-bg{height:4px;background:#334155;border-radius:4px;margin-top:4px;overflow:hidden}
             .margin-bar-fill{height:100%;border-radius:4px;background:#1D9E75;transition:width 0.4s}
             .toast{position:fixed;bottom:16px;right:16px;background:#1e293b;border:0.5px solid #334155;border-radius:8px;padding:8px 14px;font-size:12px;color:#f1f5f9;opacity:0;transition:opacity 0.3s;z-index:100;font-family:'Courier New',monospace}
+            .milestone-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.75);display:flex;align-items:center;justify-content:center;z-index:200;opacity:0;pointer-events:none;transition:opacity 0.4s}
+            .milestone-overlay.show{opacity:1;pointer-events:all}
+            .milestone-box{background:#1e293b;border:0.5px solid #334155;border-radius:12px;padding:32px 40px;text-align:center;max-width:340px}
+            body.light .milestone-box{background:#ffffff;border-color:#e2e8f0}
+            .milestone-emoji{font-size:40px;margin-bottom:12px}
+            .milestone-title{font-size:22px;font-weight:500;color:#f1f5f9;margin-bottom:6px;font-family:'Courier New',monospace}
+            body.light .milestone-title{color:#0f172a}
+            .milestone-sub{font-size:12px;color:#64748b;margin-bottom:20px;line-height:1.6}
+            .milestone-close{padding:8px 24px;font-size:11px;border:0.5px solid #334155;border-radius:6px;background:transparent;color:#94a3b8;cursor:pointer;letter-spacing:0.06em;text-transform:uppercase}
+            .milestone-close:hover{background:#334155;color:#f1f5f9}
         </style>
     </head>
     <body>
+
+    <div class="milestone-overlay" id="milestone-overlay" onclick="closeMilestone()">
+        <div class="milestone-box" onclick="event.stopPropagation()">
+            <div class="milestone-emoji">🎉</div>
+            <div class="milestone-title" id="milestone-title">—</div>
+            <div class="milestone-sub">Keep it up. Compounding is working.<br>Discipline &gt; Luck</div>
+            <button class="milestone-close" onclick="closeMilestone()">Continue</button>
+        </div>
+    </div>
 
     <div class="topbar">
         <div class="topbar-left">
             <span class="dot" id="dot"></span>
             <span class="status-text" id="status-text">Loading...</span>
             <span class="tag tag-live" id="mode-tag">LIVE</span>
+            <img src="/static/sgnticon.png" class="icon" alt="SGNT" onclick="window.location.href='/'" style="cursor: pointer; width: 30px;">
         </div>
-        <div style="display:flex;gap:8px;align-items:center">
-            <span class="status-text" id="uptime-text"></span>
+        <div class="topbar-right">
+            <button class="theme-toggle" onclick="toggleTheme()" id="theme-btn">🌙</button>
             <button class="btn" onclick="loadData()">Update</button>
             <button class="btn btn-danger" onclick="doLogout()">Logout</button>
         </div>
@@ -2174,11 +2303,26 @@ def dashboard():
         <div class="card">
             <div class="card-title">Parameters</div>
             <div style="font-size:11px;color:#64748b;margin-bottom:4px">SL % <span id="sl-val" style="color:#f1f5f9">—</span></div>
-            <div class="input-row"><input type="number" id="sl-input" placeholder="ex. 2.0" step="0.1" min="0.1" max="50"><button class="btn" onclick="setParam('sl','value',document.getElementById('sl-input').value)">Set</button></div>
+            <div class="input-row">
+                <input type="number" id="sl-input" placeholder="0.1–50" step="0.1" min="0.1" max="50">
+                <button class="btn-minmax" onclick="setInputVal('sl-input',0.1)">min</button>
+                <button class="btn-minmax" onclick="setInputVal('sl-input',50)">max</button>
+                <button class="btn" onclick="setParam('sl','value',document.getElementById('sl-input').value)">Set</button>
+            </div>
             <div style="font-size:11px;color:#64748b;margin:8px 0 4px">TP % <span id="tp-val" style="color:#f1f5f9">—</span></div>
-            <div class="input-row"><input type="number" id="tp-input" placeholder="ex. 4.0" step="0.1" min="0.1" max="50"><button class="btn" onclick="setParam('tp','value',document.getElementById('tp-input').value)">Set</button></div>
+            <div class="input-row">
+                <input type="number" id="tp-input" placeholder="0.1–50" step="0.1" min="0.1" max="50">
+                <button class="btn-minmax" onclick="setInputVal('tp-input',0.1)">min</button>
+                <button class="btn-minmax" onclick="setInputVal('tp-input',50)">max</button>
+                <button class="btn" onclick="setParam('tp','value',document.getElementById('tp-input').value)">Set</button>
+            </div>
             <div style="font-size:11px;color:#64748b;margin:8px 0 4px">Retries <span id="retries-val" style="color:#f1f5f9">—</span></div>
-            <div class="input-row"><input type="number" id="retries-input" placeholder="1-5" min="1" max="5"><button class="btn" onclick="setParam('retries','value',document.getElementById('retries-input').value)">Set</button></div>
+            <div class="input-row">
+                <input type="number" id="retries-input" placeholder="1–5" min="1" max="5">
+                <button class="btn-minmax" onclick="setInputVal('retries-input',1)">min</button>
+                <button class="btn-minmax" onclick="setInputVal('retries-input',5)">max</button>
+                <button class="btn" onclick="setParam('retries','value',document.getElementById('retries-input').value)">Set</button>
+            </div>
         </div>
 
         <div class="section-label">Operations</div>
@@ -2207,18 +2351,38 @@ def dashboard():
         <div class="card">
             <div class="card-title">Logs</div>
             <div style="font-size:11px;color:#64748b;margin-bottom:4px">Log view <span id="log-view-val" style="color:#f1f5f9">—</span></div>
-            <div class="input-row"><input type="number" id="log-view-input" placeholder="0-80" min="0" max="80"><button class="btn" onclick="setParam('log_view','value',document.getElementById('log-view-input').value)">Set</button></div>
+            <div class="input-row">
+                <input type="number" id="log-view-input" placeholder="0–100" min="0" max="100">
+                <button class="btn-minmax" onclick="setInputVal('log-view-input',0)">min</button>
+                <button class="btn-minmax" onclick="setInputVal('log-view-input',100)">max</button>
+                <button class="btn" onclick="setParam('log_view','value',document.getElementById('log-view-input').value)">Set</button>
+            </div>
             <div style="margin-top:10px"><a href="/logs"><button class="btn" style="width:100%">See logs</button></a></div>
         </div>
 
         <div class="card">
             <div class="card-title">Admin Session</div>
             <div style="font-size:11px;color:#64748b;margin-bottom:4px">Session Timeout <span id="session-val" style="color:#f1f5f9">—</span> min</div>
-            <div class="input-row"><input type="number" id="session-input" placeholder="1-15" min="1" max="15"><button class="btn" onclick="setParam('session_timeout','value',document.getElementById('session-input').value)">Set</button></div>
+            <div class="input-row">
+                <input type="number" id="session-input" placeholder="1–15" min="1" max="15">
+                <button class="btn-minmax" onclick="setInputVal('session-input',1)">min</button>
+                <button class="btn-minmax" onclick="setInputVal('session-input',15)">max</button>
+                <button class="btn" onclick="setParam('session_timeout','value',document.getElementById('session-input').value)">Set</button>
+            </div>
             <div style="font-size:11px;color:#64748b;margin:8px 0 4px">Login Limit <span id="login-limit-val" style="color:#f1f5f9">—</span></div>
-            <div class="input-row"><input type="number" id="login-limit-input" placeholder="1-15" min="1" max="15"><button class="btn" onclick="setParam('login_limit','value',document.getElementById('login-limit-input').value)">Set</button></div>
+            <div class="input-row">
+                <input type="number" id="login-limit-input" placeholder="1–15" min="1" max="15">
+                <button class="btn-minmax" onclick="setInputVal('login-limit-input',1)">min</button>
+                <button class="btn-minmax" onclick="setInputVal('login-limit-input',15)">max</button>
+                <button class="btn" onclick="setParam('login_limit','value',document.getElementById('login-limit-input').value)">Set</button>
+            </div>
             <div style="font-size:11px;color:#64748b;margin:8px 0 4px">Login Retry <span id="login-retry-val" style="color:#f1f5f9">—</span> min</div>
-            <div class="input-row"><input type="number" id="login-retry-input" placeholder="1-15" min="1" max="15"><button class="btn" onclick="setParam('login_retry','value',document.getElementById('login-retry-input').value)">Set</button></div>
+            <div class="input-row">
+                <input type="number" id="login-retry-input" placeholder="1–15" min="1" max="15">
+                <button class="btn-minmax" onclick="setInputVal('login-retry-input',1)">min</button>
+                <button class="btn-minmax" onclick="setInputVal('login-retry-input',15)">max</button>
+                <button class="btn" onclick="setParam('login_retry','value',document.getElementById('login-retry-input').value)">Set</button>
+            </div>
         </div>
 
         <div class="card" style="display:flex;flex-direction:column;justify-content:space-between">
@@ -2241,12 +2405,36 @@ def dashboard():
             setTimeout(() => t.style.opacity = '0', 2500);
         }
 
+        function setInputVal(id, val) {
+            document.getElementById(id).value = val;
+        }
+
+        function showMilestone(amount) {
+            document.getElementById('milestone-title').textContent = amount.toLocaleString() + ' USDC reached';
+            document.getElementById('milestone-overlay').classList.add('show');
+        }
+
+        function closeMilestone() {
+            document.getElementById('milestone-overlay').classList.remove('show');
+        }
+
+        function toggleTheme() {
+            const light = document.body.classList.toggle('light');
+            document.getElementById('theme-btn').textContent = light ? '☀️' : '🌙';
+            localStorage.setItem('sgnt-theme', light ? 'light' : 'dark');
+        }
+
+        if (localStorage.getItem('sgnt-theme') === 'light') {
+            document.body.classList.add('light');
+            document.getElementById('theme-btn').textContent = '☀️';
+        }
+
         async function api(url) {
             try {
                 const r = await fetch(url);
-                if (r.status === 403) { toast('Sesión expirada', false); return null; }
+                if (r.status === 403) { toast('Session expired', false); return null; }
                 return await r.json();
-            } catch(e) { toast('Error de red', false); return null; }
+            } catch(e) { toast('Network error', false); return null; }
         }
 
         async function loadData() {
@@ -2298,6 +2486,11 @@ def dashboard():
             document.getElementById('status-text').textContent = live ? 'Trading active' : 'Trading paused';
             document.getElementById('mode-tag').textContent = testnet ? 'TESTNET' : 'LIVE';
             document.getElementById('mode-tag').className = 'tag ' + (testnet ? 'tag-testnet' : 'tag-live');
+
+            const milestones = d.milestonesReached || [];
+            if (milestones.length > 0) {
+                showMilestone(milestones[milestones.length - 1]);
+            }
         }
 
         async function callToggle(param, checked) {
@@ -2387,13 +2580,11 @@ def logs():
     if filename:
         if not filename.endswith(".log"):
             return {"error": "invalid file type"}, 400
-
         if not os.path.isfile(filename):
             return {"error": "file not found"}, 404
-
         if level:
             with open(filename, "r", encoding="utf-8") as f:
-                filtered_lines = (line for line in f if level in line)
+                filtered_lines = [line for line in f if level in line]
             return Response(
                 "".join(filtered_lines),
                 mimetype="text/plain",
@@ -2406,15 +2597,19 @@ def logs():
         if f.endswith(".log") and os.path.isfile(f):
             size_mb = os.path.getsize(f) / (1024 * 1024)
             modified = os.path.getmtime(f)
+            display_name = f
+            if f == "sgnt.log":
+                date_str = datetime.utcnow().strftime("%Y-%m-%d")
+                display_name = f"sgnt.{date_str}.log"
             log_files.append({
                 "name": f,
+                "display": display_name,
                 "size": f"{size_mb:.2f} MB",
                 "modified": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(modified))
             })
     log_files.sort(key=lambda x: x["modified"], reverse=True)
 
     latest_logs = []
-
     if log_files:
         latest_file = log_files[0]["name"]
         with open(latest_file, "r", encoding="utf-8") as f:
@@ -2432,14 +2627,30 @@ def logs():
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
         <style>
             *{box-sizing:border-box;margin:0;padding:0}
-            body{background:#0f172a;color:#e2e8f0;font-family:'Inter',sans-serif;padding:20px;font-size:14px}
+            body{background:#0f172a;color:#e2e8f0;font-family:'Inter',sans-serif;padding:20px;font-size:14px;transition:background 0.2s,color 0.2s}
+            body.light{background:#f8fafc;color:#0f172a}
             .topbar{display:flex;justify-content:space-between;align-items:center;padding:0 0 14px;border-bottom:0.5px solid #1e293b;margin-bottom:16px}
+            body.light .topbar{border-bottom-color:#e2e8f0}
             .topbar-left{display:flex;align-items:center;gap:12px}
+            .topbar-right{display:flex;align-items:center;gap:8px}
             .topbar-title{font-size:13px;font-weight:500;color:#f1f5f9}
+            body.light .topbar-title{color:#0f172a}
             .btn{padding:5px 12px;font-size:11px;border:0.5px solid #334155;border-radius:6px;background:#0f172a;color:#94a3b8;cursor:pointer;white-space:nowrap;transition:0.15s;text-decoration:none;display:inline-block}
+            body.light .btn{background:#f8fafc;border-color:#cbd5e1;color:#64748b}
             .btn:hover{background:#1e293b;color:#f1f5f9}
+            body.light .btn:hover{background:#e2e8f0;color:#0f172a}
             .btn-blue{border-color:#1e40af;color:#93c5fd}
-            .btn-blue:hover{background:#0f172a}
+            .theme-toggle{background:none;border:0.5px solid #334155;border-radius:20px;padding:4px 10px;cursor:pointer;font-size:13px;color:#94a3b8;transition:0.15s;display:flex;align-items:center;gap:6px}
+            body.light .theme-toggle{border-color:#cbd5e1;color:#64748b}
+            .theme-toggle:hover{background:#1e293b}
+            body.light .theme-toggle:hover{background:#e2e8f0}
+            .refresh-toggle{display:flex;align-items:center;gap:6px;font-size:11px;color:#64748b;font-family:'Courier New',monospace}
+            .toggle{position:relative;width:28px;height:15px;cursor:pointer}
+            .toggle input{opacity:0;width:0;height:0}
+            .slider{position:absolute;inset:0;background:#334155;border-radius:15px;transition:0.2s}
+            .slider:before{content:'';position:absolute;width:10px;height:10px;left:2px;top:2px;background:#94a3b8;border-radius:50%;transition:0.2s}
+            input:checked+.slider{background:#1D9E75}
+            input:checked+.slider:before{transform:translateX(13px);background:white}
             .btn-group{display:flex;gap:4px;flex-wrap:wrap}
             .filter-btn{padding:3px 10px;font-size:10px;border:0.5px solid;border-radius:4px;cursor:pointer;background:transparent;font-family:'Courier New',monospace;letter-spacing:0.04em}
             .f-info{border-color:#16a34a;color:#4ade80}
@@ -2453,14 +2664,24 @@ def logs():
             .f-date{border-color:#0e7490;color:#67e8f9}
             .f-date:hover{background:#001f2b}
             .section-label{font-size:10px;letter-spacing:0.08em;color:#475569;text-transform:uppercase;margin:20px 0 8px;padding-left:2px}
-            pre{background:#1e293b;border:0.5px solid #334155;border-radius:8px;padding:14px 16px;max-height:360px;overflow-y:auto;font-family:'Courier New',monospace;font-size:11px;line-height:1.6;color:#94a3b8;white-space:pre-wrap;word-break:break-all}
+            pre{background:#1e293b;border:0.5px solid #334155;border-radius:8px;padding:14px 16px;max-height:400px;overflow-y:auto;font-family:'Courier New',monospace;font-size:11px;line-height:1.7;color:#94a3b8;white-space:pre-wrap;word-break:break-all}
+            body.light pre{background:#f1f5f9;border-color:#cbd5e1;color:#475569}
+            .log-line{display:block;padding:1px 4px;border-radius:3px;margin:1px 0}
+            .log-error{background:rgba(239,68,68,0.12);color:#fca5a5}
+            .log-warning{color:#fbbf24}
+            .log-admin{color:#c4b5fd}
+            .log-date{color:#67e8f9}
             table{width:100%;border-collapse:collapse}
             thead tr{border-bottom:0.5px solid #334155}
+            body.light thead tr{border-bottom-color:#e2e8f0}
             th{font-size:10px;letter-spacing:0.06em;color:#475569;text-transform:uppercase;padding:8px 12px;text-align:left;font-weight:400}
             td{padding:10px 12px;font-size:12px;border-bottom:0.5px solid #1e293b;vertical-align:middle}
+            body.light td{border-bottom-color:#e2e8f0}
             tr:last-child td{border-bottom:none}
             tr:hover td{background:#1e293b}
+            body.light tr:hover td{background:#f1f5f9}
             .td-name{color:#f1f5f9;font-family:'Courier New',monospace}
+            body.light .td-name{color:#0f172a}
             .td-muted{color:#64748b}
         </style>
     </head>
@@ -2469,13 +2690,24 @@ def logs():
     <div class="topbar">
         <div class="topbar-left">
             <a href="/dashboard" class="btn">← Dashboard</a>
+            <img src="/static/sgnticon.png" class="icon" alt="SGNT" onclick="window.location.href='/'" style="cursor: pointer; width: 30px;">
             <span class="topbar-title">Logs</span>
         </div>
-        <a href="/logs?download=all" class="btn btn-blue">Download all</a>
+        <div class="topbar-right">
+            <div class="refresh-toggle">
+                <label class="toggle">
+                    <input type="checkbox" id="auto-refresh" onchange="toggleRefresh(this.checked)">
+                    <span class="slider"></span>
+                </label>
+                <span>Auto-refresh</span>
+            </div>
+            <button class="theme-toggle" onclick="toggleTheme()" id="theme-btn">🌙</button>
+            <a href="/logs?download=all" class="btn btn-blue">Download all</a>
+        </div>
     </div>
 
     <div class="section-label">Live preview — last {{ preview_size }} lines</div>
-    <pre>{% for line in preview %}{{ line }}{% endfor %}</pre>
+    <pre id="log-preview">{% for line in preview %}<span class="{{ line | log_class }}">{{ line }}</span>{% endfor %}</pre>
 
     <div class="section-label">Log files</div>
     <table>
@@ -2491,7 +2723,7 @@ def logs():
         <tbody>
         {% for log in logs %}
         <tr>
-            <td class="td-name">{{ log.name }}</td>
+            <td class="td-name">{{ log.display }}</td>
             <td class="td-muted">{{ log.size }}</td>
             <td class="td-muted">{{ log.modified }}</td>
             <td><a href="/logs?file={{ log.name }}" class="btn">Download</a></td>
@@ -2509,9 +2741,56 @@ def logs():
         </tbody>
     </table>
 
+    <script>
+        let refreshInterval = null;
+
+        function toggleRefresh(enabled) {
+            if (enabled) {
+                refreshInterval = setInterval(fetchLogs, 10000);
+            } else {
+                clearInterval(refreshInterval);
+                refreshInterval = null;
+            }
+        }
+
+        async function fetchLogs() {
+            try {
+                const r = await fetch('/logs_preview');
+                const d = await r.json();
+                const pre = document.getElementById('log-preview');
+                pre.innerHTML = d.lines.map(line => `<span class="${logClass(line)}">${escHtml(line)}</span>`).join('');
+                pre.scrollTop = pre.scrollHeight;
+            } catch(e) {}
+        }
+
+        function logClass(line) {
+            if (line.includes('| ERROR |')) return 'log-line log-error';
+            if (line.includes('| WARNING |')) return 'log-line log-warning';
+            if (line.includes('| ADMIN |')) return 'log-line log-admin';
+            if (line.includes('| DATE |')) return 'log-line log-date';
+            return 'log-line';
+        }
+
+        function escHtml(str) {
+            return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        }
+
+        function toggleTheme() {
+            const light = document.body.classList.toggle('light');
+            document.getElementById('theme-btn').textContent = light ? '☀️' : '🌙';
+            localStorage.setItem('sgnt-theme', light ? 'light' : 'dark');
+        }
+
+        if (localStorage.getItem('sgnt-theme') === 'light') {
+            document.body.classList.add('light');
+            document.getElementById('theme-btn').textContent = '☀️';
+        }
+    </script>
+
     </body>
     </html>
     """
+
     return render_template_string(html, logs=log_files, preview=latest_logs, preview_size=LOG_VIEW)
 
 
@@ -2528,13 +2807,20 @@ def metrics():
             <title>SGNT Metrics</title>
             <link rel="icon" type="image/png" href="/static/sgnticon.png">
             <style>
-                body{background:#0f172a;color:#94a3b8;font-family:'Inter',sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;font-size:13px}
+                *{box-sizing:border-box;margin:0;padding:0}
+                body{background:#0f172a;color:#94a3b8;font-family:'Inter',sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;margin:0;font-size:13px}
+                img{width:120px;opacity:0.3;margin-bottom:20px}
+                p{font-family:'Courier New',monospace;letter-spacing:0.06em}
             </style>
         </head>
-        <body>No snapshot data yet.</body>
+        <body>
+            <img src="/static/sgntlogo.png" alt="SGNT">
+            <p>No snapshot data yet.</p>
+        </body>
         </html>
         """
 
+    import json
     return f"""
     <!DOCTYPE html>
     <html>
@@ -2545,18 +2831,32 @@ def metrics():
         <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
         <style>
             *{{box-sizing:border-box;margin:0;padding:0}}
-            body{{background:#0f172a;color:#e2e8f0;font-family:'Inter',sans-serif;padding:20px;font-size:14px}}
+            body{{background:#0f172a;color:#e2e8f0;font-family:'Inter',sans-serif;padding:20px;font-size:14px;transition:background 0.2s,color 0.2s}}
+            body.light{{background:#f8fafc;color:#0f172a}}
             .topbar{{display:flex;justify-content:space-between;align-items:center;padding:0 0 14px;border-bottom:0.5px solid #1e293b;margin-bottom:16px}}
+            body.light .topbar{{border-bottom-color:#e2e8f0}}
             .topbar-left{{display:flex;align-items:center;gap:12px}}
+            .topbar-right{{display:flex;align-items:center;gap:8px}}
             .topbar-title{{font-size:13px;font-weight:500;color:#f1f5f9}}
+            body.light .topbar-title{{color:#0f172a}}
+            .logo{{height:22px;opacity:0.85;display:block}}
             .btn{{padding:5px 12px;font-size:11px;border:0.5px solid #334155;border-radius:6px;background:#0f172a;color:#94a3b8;cursor:pointer;white-space:nowrap;transition:0.15s;text-decoration:none;display:inline-block}}
+            body.light .btn{{background:#f8fafc;border-color:#cbd5e1;color:#64748b}}
             .btn:hover{{background:#1e293b;color:#f1f5f9}}
-            .section-label{{font-size:10px;letter-spacing:0.08em;color:#475569;text-transform:uppercase;margin:20px 0 8px;padding-left:2px}}
+            body.light .btn:hover{{background:#e2e8f0;color:#0f172a}}
+            .theme-toggle{{background:none;border:0.5px solid #334155;border-radius:20px;padding:4px 10px;cursor:pointer;font-size:13px;color:#94a3b8;transition:0.15s}}
+            body.light .theme-toggle{{border-color:#cbd5e1;color:#64748b}}
+            .theme-toggle:hover{{background:#1e293b}}
+            body.light .theme-toggle:hover{{background:#e2e8f0}}
             .chart-card{{background:#1e293b;border:0.5px solid #334155;border-radius:8px;padding:16px;margin-bottom:12px}}
+            body.light .chart-card{{background:#ffffff;border-color:#e2e8f0}}
             .chart-header{{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}}
             .chart-title{{font-size:11px;letter-spacing:0.06em;color:#64748b;text-transform:uppercase}}
             .dl-btn{{padding:3px 10px;font-size:10px;border:0.5px solid #334155;border-radius:4px;background:transparent;color:#64748b;cursor:pointer}}
+            body.light .dl-btn{{border-color:#cbd5e1}}
             .dl-btn:hover{{background:#0f172a;color:#94a3b8}}
+            body.light .dl-btn:hover{{background:#e2e8f0;color:#0f172a}}
+            .snapshot-count{{font-size:11px;color:#475569;font-family:'Courier New',monospace}}
         </style>
     </head>
     <body>
@@ -2564,9 +2864,12 @@ def metrics():
     <div class="topbar">
         <div class="topbar-left">
             <a href="/dashboard" class="btn">← Dashboard</a>
-            <span class="topbar-title">Metrics</span>
+            <img src="/static/sgnticon.png" class="icon" alt="SGNT" onclick="window.location.href='/'" style="cursor: pointer; width: 30px;">
         </div>
-        <span style="font-size:11px;color:#475569;font-family:'Courier New',monospace">{len(SNAPSHOT_HISTORY)} snapshots</span>
+        <div class="topbar-right">
+            <span class="snapshot-count">{len(SNAPSHOT_HISTORY)} snapshots</span>
+            <button class="theme-toggle" onclick="toggleTheme()" id="theme-btn">🌙</button>
+        </div>
     </div>
 
     <div class="chart-card">
@@ -2594,15 +2897,34 @@ def metrics():
     </div>
 
     <script>
-    const data = {SNAPSHOT_HISTORY};
+    const data = {json.dumps(SNAPSHOT_HISTORY)};
     const SNAPSHOT_INTERVAL = {SNAPSHOT_INTERVAL};
     const labels = data.map(d => d.time);
 
-    Chart.defaults.color = '#64748b';
-    Chart.defaults.borderColor = '#1e293b';
+    const isLight = localStorage.getItem('sgnt-theme') === 'light';
+    if (isLight) {{
+        document.body.classList.add('light');
+        document.getElementById('theme-btn').textContent = '☀️';
+    }}
+
+    function gridColor() {{
+        return document.body.classList.contains('light') ? '#e2e8f0' : '#1e293b';
+    }}
+
+    Chart.defaults.color = isLight ? '#475569' : '#64748b';
+    Chart.defaults.borderColor = gridColor();
 
     function dataset(label, key, color) {{
-        return {{label, data: data.map(d => d[key]), borderColor: color, backgroundColor: color + '18', tension: 0.3, pointRadius: 2, pointHoverRadius: 4, fill: false}};
+        return {{
+            label,
+            data: data.map(d => d[key]),
+            borderColor: color,
+            backgroundColor: color + '18',
+            tension: 0.3,
+            pointRadius: 2,
+            pointHoverRadius: 4,
+            fill: false
+        }};
     }}
 
     function downloadChart(chartId) {{
@@ -2613,12 +2935,19 @@ def metrics():
         link.click();
     }}
 
+    function toggleTheme() {{
+        const light = document.body.classList.toggle('light');
+        document.getElementById('theme-btn').textContent = light ? '☀️' : '🌙';
+        localStorage.setItem('sgnt-theme', light ? 'light' : 'dark');
+        location.reload();
+    }}
+
     const commonOptions = {{
         responsive: true,
         plugins: {{legend: {{labels: {{font: {{size: 11}}, boxWidth: 12}}}}}},
         scales: {{
-            x: {{ticks: {{font: {{size: 10}}, maxTicksLimit: 8}}, grid: {{color: '#1e293b'}}}},
-            y: {{ticks: {{font: {{size: 10}}}}, grid: {{color: '#1e293b'}}}}
+            x: {{ticks: {{font: {{size: 10}}, maxTicksLimit: 8}}, grid: {{color: gridColor()}}}},
+            y: {{ticks: {{font: {{size: 10}}}}, grid: {{color: gridColor()}}}}
         }}
     }};
 
@@ -2635,32 +2964,11 @@ def metrics():
 
     new Chart(document.getElementById('marginChart'), {{
         type: 'line',
-        data: {{
-            labels,
-            datasets: [dataset("Margin Level", "marginLevel", "#a78bfa")]
-        }},
-        options: {{
-            ...commonOptions,
-            scales: {{
-                ...commonOptions.scales,
-                y: {{
-                    type: 'logarithmic',
-                    min: 1,
-                    max: 1000,
-                    ticks: {{
-                        font: {{ size: 10 }},
-                        callback: function(value) {{
-                            return Number(value).toString();
-                        }}
-                    }},
-                    grid: {{ color: '#1e293b' }}
-                }}
-            }}
-        }}
+        data: {{labels, datasets: [dataset("Margin Level", "marginLevel", "#a78bfa")]}},
+        options: commonOptions
     }});
 
     const activityDatasets = [];
-
     if (SNAPSHOT_INTERVAL === 1) {{
         activityDatasets.push(
             {{type:'bar', label:'Longs Today', data: data.map(d => d.longsToday), backgroundColor:'rgba(74,222,128,0.5)', stack:'daily'}},
@@ -2668,22 +2976,14 @@ def metrics():
         );
     }}
     activityDatasets.push(
-        {{type:'line', label:'Total Longs', data: data.map(d => d.totalLongs), borderColor:'#4ade80', tension:0.3, pointRadius:2, yAxisID:'y1'}},
-        {{type:'line', label:'Total Shorts', data: data.map(d => d.totalShorts), borderColor:'#f87171', tension:0.3, pointRadius:2, yAxisID:'y1'}},
-        {{type:'line', label:'Trades', data: data.map(d => d.tradeId), borderColor:'#e2e8f0', tension:0.3, pointRadius:2, yAxisID:'y1'}}
+        {{type:'line', label:'Total Longs', data: data.map(d => d.totalLongs), borderColor:'#4ade80', tension:0.3, pointRadius:2}},
+        {{type:'line', label:'Total Shorts', data: data.map(d => d.totalShorts), borderColor:'#f87171', tension:0.3, pointRadius:2}},
+        {{type:'line', label:'Trades', data: data.map(d => d.tradeId), borderColor:'#e2e8f0', tension:0.3, pointRadius:2}}
     );
 
     new Chart(document.getElementById('activityChart'), {{
         data: {{labels, datasets: activityDatasets}},
-        options: {{
-            responsive: true,
-            plugins: {{legend: {{labels: {{font: {{size: 11}}, boxWidth: 12}}}}}},
-            scales: {{
-                x: {{ticks: {{font: {{size: 10}}, maxTicksLimit: 8}}, grid: {{color: '#1e293b'}}}},
-                y: {{beginAtZero: true, stacked: SNAPSHOT_INTERVAL === 1, ticks: {{font: {{size: 10}}}}, grid: {{color: '#1e293b'}}, title: {{display: true, text: 'Daily', font: {{size: 10}}, color: '#475569'}}}},
-                y1: {{beginAtZero: true, position: 'right', ticks: {{font: {{size: 10}}}}, grid: {{drawOnChartArea: false}}, title: {{display: true, text: 'Total', font: {{size: 10}}, color: '#475569'}}}}
-            }}
-        }}
+        options: commonOptions
     }});
     </script>
 
@@ -2697,3 +2997,4 @@ def metrics():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
+    
