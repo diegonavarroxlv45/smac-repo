@@ -51,56 +51,73 @@ DFT_RETRIES = 3
 DFT_LOG_VIEW = 50
 DFT_LOGIN_LIMIT = 5
 DFT_LOGIN_RETRY = 5
-DFT_SESSION_TIMEOUT = 5
+DFT_SESSION_TIME = 5
 
 # --- BOOL VARIABLES ---
 TRADING = os.getenv("TRADING", "true").lower() == "true"
 TESTNET = os.getenv("TESTNET", "false").lower() == "true"
 SL_OVERRIDE = os.getenv("SL_OVERRIDE", "true").lower() == "true"
 TP_OVERRIDE = os.getenv("TP_OVERRIDE", "true").lower() == "true"
+DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 
 # --- ENVIRONMENT VARIABLES ---
-SL_PCT = float(os.getenv("SL_PCT", "2"))                         # %
-TP_PCT = float(os.getenv("TP_PCT", "4"))                         # %
-RETRIES = int(os.getenv("RETRIES", "3"))                         # NUMBER
-LOG_VIEW = int(os.getenv("LOG_VIEW", "50"))                      # NUMBER
-LOGIN_LIMIT = int(os.getenv("LOGIN_LIMIT", "5"))                 # NUMBER
-LOGIN_RETRY = int(os.getenv("LOGIN_RETRY", "5"))                 # MINUTES
-SESSION_TIMEOUT = int(os.getenv("SESSION_TIMEOUT", "5"))         # MINUTES
+SL_PCT = float(os.getenv("SL_PCT", "2"))                     # %
+TP_PCT = float(os.getenv("TP_PCT", "4"))                     # %
+RETRIES = int(os.getenv("RETRIES", "3"))                     # NUMBER
+LOG_VIEW = int(os.getenv("LOG_VIEW", "50"))                  # NUMBER
+LOGIN_LIMIT = int(os.getenv("LOGIN_LIMIT", "5"))             # NUMBER
+LOGIN_RETRY = int(os.getenv("LOGIN_RETRY", "5"))             # MINUTES
+SESSION_TIME = int(os.getenv("SESSION_TIME", "5"))           # MINUTES
 
-# --- STATIC VARIABLES ---
-COMMISSION = Decimal(os.getenv("COMMISSION", "0.1"))             # %
-MAX_RISK_PCT = float(os.getenv("MAX_RISK_PCT", "20"))            # %
-MAX_RISK_PCT = max(0.1, min(MAX_RISK_PCT, 20))                   # %
-DEFAULT_RISK_PCT = float(os.getenv("DEFAULT_RISK_PCT", "5"))     # %
-DEFAULT_RISK_PCT = max(0.1, min(DEFAULT_RISK_PCT, MAX_RISK_PCT)) # %
-BOOT_PERIOD = int(os.getenv("BOOT_PERIOD", "1"))                 # MINUTES
-GRACE_PERIOD = int(os.getenv("GRACE_PERIOD", "2"))               # MINUTES
-SNAPSHOT_INTERVAL = int(os.getenv("SNAPSHOT_INTERVAL", "1"))     # DAYS
-MAX_SNAPSHOTS = int(os.getenv("MAX_SNAPSHOTS", "500"))           # NUMBER
-PORT = int(os.getenv("PORT", "5000"))                            # NUMBER
+# --- VARIABLE MINS ---
+MIN_SL_PCT = 0.1                                             # %
+MIN_TP_PCT = 0.1                                             # %
+MIN_RETRIES = 1                                              # NUMBER
+MIN_LOG_VIEW = 0                                             # NUMBER
+MIN_LOGIN_LIMIT = 1                                          # NUMBER
+MIN_LOGIN_RETRY = 1                                          # MINUTES
+MIN_SESSION_TIME = 1                                         # MINUTES
+
+# --- VARIABLE MAXS ---
+MAX_SL_PCT = 50                                              # %
+MAX_TP_PCT = 50                                              # %
+MAX_RETRIES = 5                                              # NUMBER
+MAX_LOG_VIEW = 100                                           # NUMBER
+MAX_LOGIN_LIMIT = 15                                         # NUMBER
+MAX_LOGIN_RETRY = 15                                         # MINUTES
+MAX_SESSION_TIME = 15                                        # MINUTES
+
+# --- MARGIN LEVEL THRESHOLDS ---
+ML_WARNING = 2                                               # NUMBER
+ML_DANGER = 1.25                                             # NUMBER
+ML_CRITICAL = 1.16                                           # NUMBER
+ML_LIQUIDATION = 1.1                                         # NUMBER
 
 # --- TRADE COUNTER VARIABLES ---
-TRADE_COUNTER = 0
-DAILY_LONGS = 0
-DAILY_SHORTS = 0
-TOTAL_LONGS = 0
-TOTAL_SHORTS = 0
-CURRENT_DAY = datetime.utcnow().date()
-LAST_TRADE = None
+TRADE_COUNTER = 0                                            # NUMBER
+DAILY_LONGS = 0                                              # NUMBER
+DAILY_SHORTS = 0                                             # NUMBER
+TOTAL_LONGS = 0                                              # NUMBER
+TOTAL_SHORTS = 0                                             # NUMBER
+CURRENT_DAY = datetime.utcnow().date()                       # NUMBER
+LAST_TRADE = None                                            # NUMBER
 
 # --- SECRET VARIABLES ---
-BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
-BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
-TESTNET_API_KEY = os.getenv("TESTNET_API_KEY")
-TESTNET_API_SECRET = os.getenv("TESTNET_API_SECRET")
-TRADING_KEY = os.getenv("TRADING_KEY")
-ADMIN_KEY = os.getenv("ADMIN_KEY")
+BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")               # API
+BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")         # API
+TESTNET_API_KEY = os.getenv("TESTNET_API_KEY")               # API
+TESTNET_API_SECRET = os.getenv("TESTNET_API_SECRET")         # API
+TRADING_KEY = os.getenv("TRADING_KEY")                       # KEY
+ADMIN_KEY = os.getenv("ADMIN_KEY")                           # KEY
+
+# --- PORT VARIABLES ---
+PORT = int(os.getenv("PORT", "5000"))
 
 
 # ====== LOGGING ======
 """Logger setup with rotating file handler, console handler, custom ADMIN and DATE log levels."""
 
+# --- LOGGER SETTINGS ---
 logger = logging.getLogger("sgnt")
 logger.setLevel(logging.INFO)
 
@@ -123,6 +140,7 @@ console_handler.setFormatter(formatter)
 logger.addHandler(handler)
 logger.addHandler(console_handler)
 
+# --- ADMIN LABEL ---
 ADMIN_LEVEL = 25
 logging.addLevelName(ADMIN_LEVEL, "ADMIN")
 
@@ -132,6 +150,7 @@ def admin(self, message, *args, **kwargs):
 
 logging.Logger.admin = admin
 
+# --- DATE LABEL ---
 DATE_LEVEL = 26
 logging.addLevelName(DATE_LEVEL, "DATE")
 
@@ -147,6 +166,7 @@ logging.Logger.date = date
 
 # --- BINANCE / TESTNET CONFIGURATION ---
 if TESTNET:
+    # 🧪 TESTNET CONFIG
     BINANCE_API_KEY = os.getenv("TESTNET_API_KEY")
     BINANCE_API_SECRET = os.getenv("TESTNET_API_SECRET")
     BASE_URL = "https://testnet.binance.vision"
@@ -159,6 +179,7 @@ if TESTNET:
     logger.info("🔐 Testnet API credentials loaded successfully")
 
 else:
+    # 🌐 BINANCE CONFIG
     BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
     BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
     BASE_URL = "https://api.binance.com"
@@ -174,11 +195,16 @@ else:
 # ====== SAFE DEPLOYMENT PATTERN ======
 """Boot protection and grace period logic, health checks, and bot readiness state machine to prevent trading during unstable deploys."""
 
+# --- SDP SETTINGS ---
 BOOT_TIME = time.time()
 BOT_READY = False
 LAST_HEALTH_CHECK = 0
 HEALTH_CHECK_INTERVAL = 10
 LAST_HEALTH_STATUS = False
+
+# --- SDP PERIODS ---
+BOOT_PERIOD = int(os.getenv("BOOT_PERIOD", "1"))
+GRACE_PERIOD = int(os.getenv("GRACE_PERIOD", "2"))
 
 # --- PUBLIC BINANCE REQUEST ---
 def send_public_request(http_method: str, path: str, params=None):
@@ -186,6 +212,7 @@ def send_public_request(http_method: str, path: str, params=None):
 
     try:
         return _request_with_retries(http_method, url, params=params)
+
     except Exception as e:
         logger.error(f"⚠️ Public request failed {path}: {e}")
         raise
@@ -195,14 +222,18 @@ def health_check():
     if not BOT_READY:
         logger.info("🩺 Running health check...")
 
+    # 📡 CHECK BINANCE CONNECTIVITY
     try:
         send_public_request("GET", "/api/v3/time")
+
     except Exception as e:
         logger.error(f"❌ Binance connectivity failed: {e}")
         return False
 
+    # 📡 CHECK ACCOUNT ACCESS
     try:
         get_balance_margin("USDC")
+
     except Exception as e:
         logger.error(f"❌ Account access failed: {e}")
         return False
@@ -210,6 +241,7 @@ def health_check():
     logger.info("✅ Health check passed")
     return True
 
+# --- CACHED HEALTH CHECK ---
 def health_check_cached():
     global LAST_HEALTH_CHECK, LAST_HEALTH_STATUS
 
@@ -220,6 +252,7 @@ def health_check_cached():
 
     try:
         status = health_check()
+
     except Exception:
         status = False
 
@@ -243,13 +276,15 @@ def is_bot_ready():
         return True
 
     uptime = time.time() - BOOT_TIME
+    BOOT_SECS = BOOT_PERIOD * 60
+    GRACE_SECS = GRACE_PERIOD * 60
 
-    if uptime < (BOOT_PERIOD * 60):
-        logger.info(f"⏳ Boot protection active ({int(uptime)}s/{BOOT_PERIOD * 60}s)")
+    if uptime < BOOT_SECS:
+        logger.info(f"⌛ Boot protection active ({int(uptime)}s/{BOOT_SECS}s)")
         return False
 
-    if uptime < (GRACE_PERIOD * 60):
-        logger.info(f"🟡 Deploy grace period ({int(uptime)}s/{GRACE_PERIOD * 60}s)")
+    if uptime < GRACE_SECS:
+        logger.info(f"⏳ Deploy grace period ({int(uptime)}s/{GRACE_SECS}s)")
         return False
 
     if not health_check_cached():
@@ -264,7 +299,12 @@ def is_bot_ready():
 def trading_guard():
     if not is_bot_ready():
         return False, (
-            jsonify({"status": "booting_or_unhealthy", "trading": TRADING}), 200)
+            jsonify({
+                "status": "booting_or_unhealthy",
+                "trading": TRADING
+            }),
+            200
+        )
 
     return True, None
 
@@ -291,18 +331,34 @@ def _request_with_retries(method: str, url: str, **kwargs):
         try:
             resp = requests.request(method, url, timeout=10, **kwargs)
 
+            # ⚠ ERROR 429
             if resp.status_code == 429:
                 logger.error(f"🚫 429 RATE LIMIT hit (attempt {i+1}) → sleeping 3s")
                 time.sleep(3)
                 continue
 
+            try:
+                data = resp.json()
+
+            except Exception:
+                data = resp.text
+
+            if isinstance(data, dict) and "code" in data:
+                # ⚠ ERROR -2011
+                if data["code"] == -2011:
+                    return data
+
+                # ⚠ ERROR -2010
+                if data["code"] == -2010:
+                    msg = data.get("msg", "").lower()
+                    if "insufficient balance" in msg:
+                         return data
+
+            # ✅ 200 OK
             if resp.status_code == 200:
-                try:
-                    return resp.json()
-                except Exception:
-                    return resp.text
-            else:
-                logger.error(f"⚠️ Attempt {i+1} failed: {resp.text}")
+                return data
+
+            logger.error(f"⚠️ Attempt {i+1} failed: {data}")
 
         except Exception as e:
             logger.error(f"⚠️ Request error: {e}")
@@ -326,6 +382,7 @@ def send_signed_request(http_method: str, path: str, payload: dict):
 # ====== BALANCE & MARKET DATA ======
 """Fetches free margin balance for a given asset and retrieves symbol lot size, tick size, and notional constraints from exchange info."""
 
+# --- BALANCE FETCHING ---
 def get_balance_margin(asset="USDC") -> float:
     ts = _now_ms()
     params = {"timestamp": ts}
@@ -336,6 +393,7 @@ def get_balance_margin(asset="USDC") -> float:
     bal = next((b for b in data.get("userAssets", []) if b["asset"] == asset), None)
     return float(bal["free"]) if bal else 0.0
 
+# --- MARKET DATA FETCHING ---
 def get_symbol_lot(symbol):
     if EXCHANGE_INFO is None:
         logger.error("⚠ Exchange info is none -> Reloading...")
@@ -358,10 +416,16 @@ def get_symbol_lot(symbol):
                 "minQty": float(fs.get("minQty", 0.0)),
                 "tickSize_str": ts["tickSize"],
                 "tickSize": float(ts["tickSize"]),
-                "minNotional": minNotional
+                "minNotional": minNotional,
             }
 
     raise Exception(f"❌ Symbol not found: {symbol}")
+
+# --- MARGIN ACCOUNT FETCHING ---
+def get_margin_account():
+    params = {}
+    acc = send_signed_request("GET", "/sapi/v1/margin/account", params)
+    return acc
 
 
 # ====== TRADE COUNTER ======
@@ -386,7 +450,8 @@ def check_daily_summary():
 
         if total_trades > 0:
             logger.date(
-                f"📅 Day {CURRENT_DAY} completed! Trades: {total_trades} "
+                f"📅 Day {CURRENT_DAY} completed! "
+                f"Trades: {total_trades} "
                 f"(Longs: {DAILY_LONGS} | Shorts: {DAILY_SHORTS})"
             )
             logger.date(f"________________________________________")
@@ -407,12 +472,14 @@ threading.Thread(target=daily_watcher, daemon=True).start()
 # ====== PRICE ADJUST (tickSize) ======
 """Utility functions for rounding prices and quantities to Binance-compliant tick sizes and step sizes."""
 
+# --- TICK SIZE ---
 def format_price_to_tick(price: float, tick_size_str: str, rounding=ROUND_DOWN) -> str:
     d_tick = Decimal(str(tick_size_str))
     p = Decimal(str(price)).quantize(d_tick, rounding=rounding)
     decimals = -d_tick.as_tuple().exponent if d_tick.as_tuple().exponent < 0 else 0
     return f"{p:.{decimals}f}"
 
+# --- STEP SIZE
 def floor_to_step_str(value, step_str):
     step = Decimal(str(step_str))
     v = Decimal(str(value))
@@ -421,6 +488,7 @@ def floor_to_step_str(value, step_str):
     q = n.quantize(Decimal(1).scaleb(-decimals))
     return format(q, f".{decimals}f")
 
+# --- TICK DECIMALS ---
 def tick_decimals(tick_str: str):
     return len(tick_str.rstrip('0').split('.')[-1])
 
@@ -428,51 +496,58 @@ def tick_decimals(tick_str: str):
 # ====== CHECK MARGIN LEVEL BEFORE OPERATING ======
 """Pre-trade margin safety check: blocks or limits trading based on margin level thresholds, triggers controlled liquidation if critical."""
 
+# --- RISK_PCT VARIABLES ---
+MAX_RISK_PCT = float(os.getenv("MAX_RISK_PCT", "20"))
+MAX_RISK_PCT = max(0.1, min(MAX_RISK_PCT, 20))
+DFT_RISK_PCT = float(os.getenv("DFT_RISK_PCT", "5"))
+DFT_RISK_PCT = max(0.1, min(DFT_RISK_PCT, MAX_RISK_PCT))
+
+# --- PRE MARGIN STATUS ---
 TRADING_BLOCKED = False
 MARGIN_MAX_RISK_PCT = MAX_RISK_PCT
 
+# --- CHECK MARGIN LEVEL ---
 def check_margin_level():
     global TRADING_BLOCKED, MARGIN_MAX_RISK_PCT
 
     try:
         account_info = get_margin_account()
         margin_level = float(account_info["marginLevel"])
-        logger.info(f"🧮 Current Margin Level: {margin_level:.2f}")
 
-        # ⚰ FORCED LIQUIDATION
-        if margin_level <= 1.1001:
-            logger.warning("⚰ Your account got liquidated")
+        # ☠ FORCED LIQUIDATION
+        if margin_level <= ML_LIQUIDATION:
+            logger.warning("☠ Your account got liquidated")
             TRADING_BLOCKED = True
             clear()
             return False
 
-        # 🚨 CRITICAL — CONTROLLED LIQUIDATION
-        if margin_level < 1.16:
-            logger.warning("🚨 CRITICAL! Margin < 1.16 — EXECUTING CONTROLLED LIQUIDATION")
+        # 🟥 CRITICAL — CONTROLLED LIQUIDATION
+        if margin_level < ML_CRITICAL:
+            logger.warning(f"🟥 CRITICAL! ML: {margin_level:.2f} — EXECUTING CONTROLLED LIQUIDATION")
             TRADING_BLOCKED = True
             clear()
             return False
 
-        # 🔴 EMERGENCY — BLOCK NEW ENTRIES
-        elif margin_level < 1.25:
-            logger.warning("🔴 DANGER! Margin < 1.25 — BLOCKING NEW ENTRIES")
+        # 🟧 DANGER — BLOCK NEW ENTRIES
+        elif margin_level < ML_DANGER:
+            logger.warning(f"🟧 DANGER! ML: {margin_level:.2f} — BLOCKING NEW ENTRIES")
             TRADING_BLOCKED = True
             return True
 
-        # 🟠 DEFENSIVE — LIMIT MAX RISK
-        elif margin_level < 2:
-            logger.warning("🟠 WARNING! Margin < 2 — LIMITING MAX RISK TO 2%")
+        # 🟨 WARNING — LIMIT MAX RISK
+        elif margin_level < ML_WARNING:
+            logger.warning(f"🟨 WARNING! ML: {margin_level:.2f} — LIMITING MAX RISK TO 2%")
             MARGIN_MAX_RISK_PCT = 2
             return True
 
-        # 🟢 HEALTHY
+        # 🟩 HEALTHY
         else:
             if TRADING_BLOCKED:
-                logger.info("✅ Margin recovered — resuming normal operation")
+                logger.info("🟩 Margin recovered — resuming normal operation")
 
             TRADING_BLOCKED = False
             MARGIN_MAX_RISK_PCT = MAX_RISK_PCT
-            logger.info("✅ Margin level healthy")
+            logger.info(f"🟩 Margin level healthy! ML: {margin_level:.2f}")
             return True
 
     except Exception as e:
@@ -485,14 +560,18 @@ def check_margin_level():
 
 def resolve_risk_pct(webhook_data=None):
 
-    risk_pct = DEFAULT_RISK_PCT
+    # 💯 USING DEFAULT RISK_PCT
+    risk_pct = DFT_RISK_PCT
 
+    # 💯 USING RISK_PCT FROM PAYLOAD
     if webhook_data and "risk_pct" in webhook_data:
         try:
             risk_pct = float(webhook_data["risk_pct"])
+
         except Exception:
             logger.error("⚠️ Invalid risk_pct from webhook")
 
+    # 💯 RISK_PCT LIMITS
     risk_pct = min(risk_pct, MARGIN_MAX_RISK_PCT)
     return risk_pct / 100
 
@@ -500,23 +579,55 @@ def resolve_risk_pct(webhook_data=None):
 # ====== PRE-TRADE CLEANUP ======
 """Before each trade: cancels open orders, repays outstanding debt, and sells residual asset balance back to USDC."""
 
+# --- CANCEL ORDERS FROM SYMBOL ---
+def cancel(symbol: str):
+    base_asset = symbol.replace("USDC", "")
+
+    try:
+        # 🧹 ORDER CANCEL PARAMS
+        params = {
+            "symbol": symbol,
+            "timestamp": _now_ms()
+        }
+
+        resp = send_signed_request("DELETE", "/sapi/v1/margin/openOrders", params)
+
+        if isinstance(resp, dict) and resp.get("code") == -2011:
+            logger.info(f"ℹ️ No open orders to cancel for {symbol}")
+            return
+
+        logger.info(f"🧹 Pending orders for {symbol} canceled")
+
+    except Exception as e:
+        logger.error(f"⚠️ Couldn't cancel orders for {symbol}: {e}")
+
+# --- CANCEL ALL ORDERS FOR CLEAR ---
+def cancel_all():
+    try:
+        params = {"timestamp": _now_ms()}
+        q, sig = sign_params_query(params, BINANCE_API_SECRET)
+
+        url = f"{BASE_URL}/sapi/v1/margin/openOrders?{q}&signature={sig}"
+        headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
+        open_orders = _request_with_retries("GET", url, headers=headers)
+
+        if not open_orders:
+            logger.info("ℹ️ No open orders found")
+            return
+
+        symbols = set(order["symbol"] for order in open_orders)
+
+        for symbol in symbols:
+            cancel(symbol)
+
+    except Exception as e:
+        logger.error(f"⚠️ cancel_all error: {e}")
+
+# --- PRE-TRADE CLEANUP ---
 def handle_pre_trade_cleanup(symbol: str):
     base_asset = symbol.replace("USDC", "")
-    logger.info(f"🔄 Cleaning previous environment for {symbol}...")
 
-    # --- 1️⃣ Cancel pending orders ---
-    try:
-        params = {"symbol": symbol, "timestamp": _now_ms()}
-        send_signed_request("DELETE", "/sapi/v1/margin/openOrders", params)
-        logger.info(f"🧹 Pending orders for {symbol} canceled")
-    except Exception as e:
-        if "Unknown order sent" in str(e):
-            logger.info(f"ℹ️ No open orders to cancel for {symbol}")
-        else:
-            logger.error(f"⚠️ Couldn't cancel orders for {symbol}: {e}")
-
-
-    # --- 2️⃣ Repay debt ---
+    # --- 1️⃣ Repay debt ---
     try:
         ts = _now_ms()
         q, sig = sign_params_query({"timestamp": ts}, BINANCE_API_SECRET)
@@ -536,7 +647,7 @@ def handle_pre_trade_cleanup(symbol: str):
         free_usdc = float(usdc_data["free"]) if usdc_data else 0.0
 
         if borrowed <= 0:
-            logger.info(f"✅ No active debt in {base_asset}")
+            logger.info(f"ℹ️ No active debt in {base_asset}")
         else:
             logger.info(f"💳 Active debt detected: {borrowed} {base_asset}")
 
@@ -545,8 +656,7 @@ def handle_pre_trade_cleanup(symbol: str):
             if missing > 0:
                 lot = get_symbol_lot(symbol)
 
-                BUFFER = 1.02
-                buy_qty = missing * BUFFER
+                buy_qty = missing * 1.02
 
                 qty_str = floor_to_step_str(buy_qty, lot["stepSize_str"])
                 qty_f = float(qty_str)
@@ -565,12 +675,14 @@ def handle_pre_trade_cleanup(symbol: str):
                 if needed_usdc > free_usdc:
                     raise Exception(f"❌ Not enough USDC to buy repay asset (need {needed_usdc:.4f}, have {free_usdc:.4f})")
 
+                # 🛒 DEBT TOP UP PARAMS
                 buy_params = {
                     "symbol": symbol,
                     "side": "BUY",
                     "type": "MARKET",
                     "quantity": qty_str,
-                    "timestamp": _now_ms()}
+                    "timestamp": _now_ms()
+                }
 
                 send_signed_request("POST", "/sapi/v1/margin/order", buy_params)
                 logger.info(f"🛒 Bought {qty_str} {base_asset} to reduce debt")
@@ -592,10 +704,12 @@ def handle_pre_trade_cleanup(symbol: str):
             repay_amount = min(borrowed, free_base)
 
             if repay_amount > 0:
+                # 💰 REPAY PARAMS
                 repay_params = {
                     "asset": base_asset,
                     "amount": str(repay_amount),
-                    "timestamp": _now_ms()}
+                    "timestamp": _now_ms()
+                }
 
                 send_signed_request("POST", "/sapi/v1/margin/repay", repay_params)
                 logger.info(f"💰 Repay executed: {repay_amount} {base_asset}")
@@ -605,12 +719,12 @@ def handle_pre_trade_cleanup(symbol: str):
             if remaining > 0:
                 logger.info(f"⚠️ Remaining debt after repay: {remaining:.8f} {base_asset}")
             else:
-                logger.info(f"✅ Debt fully cleared for {base_asset}")
+                logger.info(f"ℹ️ Debt fully cleared for {base_asset}")
 
     except Exception as e:
         logger.error(f"⚠️ Error during repay in {base_asset}: {e}")
 
-    # --- 3️⃣ Sell residual balance ---
+    # --- 2️⃣ Sell residual balance ---
     try:
         lot = get_symbol_lot(symbol)
 
@@ -621,30 +735,91 @@ def handle_pre_trade_cleanup(symbol: str):
         acc_data = _request_with_retries("GET", url, headers=headers)
 
         asset_data = next((a for a in acc_data["userAssets"] if a["asset"] == base_asset), None)
+        usdc_data = next((a for a in acc_data["userAssets"] if a["asset"] == "USDC"), None)
 
         if not asset_data:
             return
 
         free = float(asset_data["free"])
+        free_usdc = float(usdc_data["free"]) if usdc_data else 0.0
 
         if free <= 0:
             logger.info(f"ℹ️ No residual {base_asset} to sell")
             return
 
-        qty_str = floor_to_step_str(free, lot["stepSize_str"])
+        r = _request_with_retries("GET", f"{BASE_URL}/api/v3/ticker/price", params={"symbol": symbol})
+        price_est = float(r["price"])
 
-        if float(qty_str) <= 0:
+        qty_str = floor_to_step_str(free, lot["stepSize_str"])
+        qty_f = float(qty_str)
+
+        if qty_f <= 0:
             logger.info(f"ℹ️ Residual {base_asset} too small to sell")
             return
 
+        notional = qty_f * price_est
+
+        if notional < lot["minNotional"]:
+            needed_qty = (lot["minNotional"] / price_est) - qty_f
+            needed_qty_buffered = needed_qty * 1.02
+            buy_qty_str = floor_to_step_str(needed_qty_buffered, lot["stepSize_str"])
+            buy_qty_f = float(buy_qty_str)
+
+            if buy_qty_f <= 0:
+                logger.info(f"ℹ️ Cannot top up {base_asset} to reach minNotional — skipping")
+                return
+
+            top_up_cost = buy_qty_f * price_est
+            if top_up_cost > free_usdc:
+                logger.info(f"ℹ️ Not enough USDC to top up {base_asset} (need {top_up_cost:.4f}, have {free_usdc:.4f}) — skipping")
+                return
+
+            # 🛒 RESIDUAL TOP UP PARAMS
+            buy_params = {
+                "symbol": symbol,
+                "side": "BUY",
+                "type": "MARKET",
+                "quantity": buy_qty_str,
+                "timestamp": _now_ms()
+            }
+            send_signed_request("POST", "/sapi/v1/margin/order", buy_params)
+            logger.info(f"🛒 Topped up {buy_qty_str} {base_asset} to reach minNotional")
+
+            time.sleep(1)
+
+            ts = _now_ms()
+            q, sig = sign_params_query({"timestamp": ts}, BINANCE_API_SECRET)
+            url = f"{BASE_URL}/sapi/v1/margin/account?{q}&signature={sig}"
+            acc_data = _request_with_retries("GET", url, headers=headers)
+            asset_data = next((a for a in acc_data["userAssets"] if a["asset"] == base_asset), None)
+            free = float(asset_data["free"])
+            qty_str = floor_to_step_str(free, lot["stepSize_str"])
+            qty_f = float(qty_str)
+
+            if qty_f <= 0:
+                logger.info(f"ℹ️ Residual {base_asset} too small to sell after top up")
+                return
+
+        # 🧹 SELL RESIDUAL PARAMS
         sell_params = {
             "symbol": symbol,
             "side": "SELL",
             "type": "MARKET",
             "quantity": qty_str,
-            "timestamp": _now_ms()}
+            "timestamp": _now_ms()
+        }
 
-        send_signed_request("POST", "/sapi/v1/margin/order", sell_params)
+        resp = send_signed_request("POST", "/sapi/v1/margin/order", sell_params)
+
+        if isinstance(resp, dict):
+            if resp.get("code") == -2010:
+                logger.info(f"ℹ️ Insufficient balance to sell residual {base_asset}, skipping")
+                return
+
+            if resp.get("code") == -1013:
+                logger.error(f"⚠️ NOTIONAL error while selling {base_asset} — qty too small or below minNotional")
+                return
+
         logger.info(f"🧹 Sold residual {qty_str} {base_asset} to USDC")
 
     except Exception as e:
@@ -660,19 +835,30 @@ def execute_long_margin(symbol, webhook_data=None):
     balance_usdc = get_balance_margin("USDC")
     risk_pct = resolve_risk_pct(webhook_data)
     qty_quote = balance_usdc * risk_pct
+
+    # 📈 MARGIN LONG PARAMS
     params = {
         "symbol": symbol,
         "side": "BUY",
         "type": "MARKET",
         "quoteOrderQty": format(qty_quote, "f"),
-        "timestamp": _now_ms()}
+        "timestamp": _now_ms()
+    }
 
     resp = send_signed_request("POST", "/sapi/v1/margin/order", params)
+
+    if isinstance(resp, dict) and resp.get("code") == -1013:
+        logger.error(f"⚠️ Long skipped for {symbol}: notional too small")
+        return {"error": "notional_too_small"}
+
     executed_qty, entry_price = extract_execution_info(resp)
+
+    # 📈 TRADE COUNTER LONG
     trade_id = next_trade_id()
     global DAILY_LONGS, TOTAL_LONGS
     DAILY_LONGS += 1
     TOTAL_LONGS += 1
+
     side = "BUY"
     handle_post_trade(symbol, side, resp, lot, webhook_data, trade_id)
     return {"order": resp, "trade_id": trade_id}
@@ -685,6 +871,7 @@ def execute_short_margin(symbol, webhook_data=None):
     try:
         r = _request_with_retries("GET", f"{BASE_URL}/api/v3/ticker/price", params={"symbol": symbol})
         price_est = float(r.get("price", 0))
+
     except Exception as e:
         logger.error(f"⚠️ Could not fetch price for {symbol}: {e}")
         return {"error": "price_fetch_failed"}
@@ -698,23 +885,34 @@ def execute_short_margin(symbol, webhook_data=None):
 
     try:
         qty_str = borrowing(raw_qty, lot, price_est, symbol)
+
     except Exception as e:
         logger.error(f"❌ Borrow failed: {e}")
         return {"error": "borrow_failed"}
 
+    # 📉 MARGIN SHORT PARAMS
     params = {
         "symbol": symbol,
         "side": "SELL",
         "type": "MARKET",
         "quantity": qty_str,
-        "timestamp": _now_ms()}
+        "timestamp": _now_ms()
+    }
 
     resp = send_signed_request("POST", "/sapi/v1/margin/order", params)
+
+    if isinstance(resp, dict) and resp.get("code") == -1013:
+        logger.error(f"⚠️ Short skipped for {symbol}: notional too small")
+        return {"error": "notional_too_small"}
+
     executed_qty, entry_price = extract_execution_info(resp)
+
+    # 📉 TRADE COUNTER SHORT
     trade_id = next_trade_id()
     global DAILY_SHORTS, TOTAL_SHORTS
     DAILY_SHORTS += 1
     TOTAL_SHORTS += 1
+
     side = "SELL"
     handle_post_trade(symbol, side, resp, lot, webhook_data, trade_id)
     return {"order": resp, "trade_id": trade_id}
@@ -729,10 +927,12 @@ def borrowing(raw_qty, lot, price_est, symbol):
     if (borrow_amount * price_est) < lot.get("minNotional", 0.0):
         raise Exception("Notional too small")
 
+    # 📥 BORROW PARAMS
     borrow_params = {
         "asset": symbol.replace("USDC", ""),
         "amount": format(Decimal(str(borrow_amount)), "f"),
-        "timestamp": _now_ms()}
+        "timestamp": _now_ms()
+    }
 
     borrow_resp = send_signed_request("POST", "/sapi/v1/margin/loan", borrow_params)
     time.sleep(0.3)
@@ -740,7 +940,8 @@ def borrowing(raw_qty, lot, price_est, symbol):
     borrowed_qty = float(
         borrow_resp.get("amount") or
         borrow_resp.get("qty") or
-        borrow_amount)
+        borrow_amount
+    )
 
     logger.info(f"📥 Borrowed {borrowed_qty} {symbol.replace('USDC','')}")
     qty_str = floor_to_step_str(borrowed_qty, lot["stepSize_str"])
@@ -791,7 +992,17 @@ def handle_post_trade(symbol, side, resp, lot, webhook_data, trade_id):
             sl_from_web = webhook_data.get("sl")
             tp_from_web = webhook_data.get("tp")
 
-        place_sl_tp_margin(symbol, side, entry_price, executed_qty, lot, sl_override=sl_from_web, tp_override=tp_from_web, trade_id=trade_id)
+        # 📌 SL/TP PLACING
+        place_sl_tp_margin(
+            symbol,
+            side,
+            entry_price,
+            executed_qty,
+            lot,
+            sl_override=sl_from_web,
+            tp_override=tp_from_web,
+            trade_id=trade_id
+            )
 
     if executed_qty > 0:
         update_last_trade(symbol, side)
@@ -802,15 +1013,21 @@ def handle_post_trade(symbol, side, resp, lot, webhook_data, trade_id):
 def update_last_trade(symbol: str, side: str):
     global LAST_TRADE
 
+    # ⌚ LAST TRADE PAYLOAD
     LAST_TRADE = {
         "symbol": symbol,
         "side": side,
-        "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")}
+        "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    }
 
 
 # ====== SL/TP FUNCTIONS ======
 """Places OCO, stop-loss-only, or take-profit-only orders after trade execution, with tick-aligned prices and commission-adjusted quantities."""
 
+# --- SL/TP RELATED VARIABLES ---
+COMMISSION = Decimal(os.getenv("COMMISSION", "0.1"))
+
+# --- SL/TP PLACING ---
 def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty: float, lot: dict, sl_override=None, tp_override=None, trade_id=None):
     try:
         COMMISSION_BUFFER = Decimal("1") - (COMMISSION / Decimal("100"))
@@ -820,11 +1037,12 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
         use_sl = sl_override is not None or (SL_OVERRIDE and SL_PCT is not None)
         use_tp = tp_override is not None or (TP_OVERRIDE and TP_PCT is not None)
 
+        # --- If not requested SL/TP ---
         if not use_sl and not use_tp:
             logger.info(f"[TRADE {trade_id}] ℹ️ No SL/TP requested for {symbol}")
             return True
 
-        # --- Price calculation ---
+        # --- SL Price calculation ---
         if sl_override is not None:
             sl_price = float(sl_override)
         elif SL_OVERRIDE and SL_PCT is not None:
@@ -832,6 +1050,7 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
         else:
             sl_price = None
 
+        # --- TP Price calculation ---
         if tp_override is not None:
             tp_price = float(tp_override)
         elif TP_OVERRIDE and TP_PCT is not None:
@@ -867,6 +1086,7 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
                 stop_limit_aligned = align_price(sl_price_aligned * 0.999, lot["tickSize_str"], ROUND_DOWN)
             else:
                 stop_limit_aligned = align_price(sl_price_aligned * 1.001, lot["tickSize_str"], ROUND_UP)
+
             stop_limit_price = f"{stop_limit_aligned:.{decimals}f}"
 
         if tp_price is not None:
@@ -904,6 +1124,7 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
 
         # --- Place OCO ---
         if order_type == "OCO":
+            # 📌 OCO PARAMS
             params = {
                 "symbol": symbol,
                 "side": oco_side,
@@ -912,7 +1133,8 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
                 "stopPrice": sl_price_str,
                 "stopLimitPrice": stop_limit_price,
                 "stopLimitTimeInForce": "GTC",
-                "timestamp": _now_ms()}
+                "timestamp": _now_ms()
+            }
 
             try:
                 send_signed_request("POST", "/sapi/v1/margin/order/oco", params)
@@ -923,15 +1145,17 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
                 profit_tp = (tp_f - entry_f) * qty_f * direction
                 loss_sl = (sl_f - entry_f) * qty_f * direction
                 rr = abs(profit_tp / loss_sl) if loss_sl != 0 else 0
-                logger.info(f"[TRADE {trade_id}] 📌 OCO placed for {symbol}: TP={tp_price_str}, SL={sl_price_str}, stopLimit={stop_limit_price} ({oco_side}), qty={qty_str}")
+                logger.info(f"[TRADE {trade_id}] 📌 OCO placed for {symbol}: TP={tp_price_str} ({oco_side}), SL={sl_price_str} ({oco_side}), qty={qty_str}")
                 logger.info(f"[TRADE {trade_id}] 🟢 TP PnL ≈ {profit_tp:.2f} USDC | 🔴 SL PnL ≈ {loss_sl:.2f} USDC | ⚖️ R:R {rr:.2f}")
                 return True
+
             except Exception as e:
                 logger.error(f"⚠️ Failed OCO for {symbol}, payload={params}: {e}")
                 return False
 
         # --- SL ONLY ---
         if order_type == "SL_ONLY":
+            # 🛑 SL PARAMS
             params = {
                 "symbol": symbol,
                 "side": oco_side,
@@ -940,14 +1164,21 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
                 "price": stop_limit_price,
                 "stopPrice": sl_price_str,
                 "timeInForce": "GTC",
-                "timestamp": _now_ms()}
+                "timestamp": _now_ms()
+            }
 
-            send_signed_request("POST", "/sapi/v1/margin/order", params)
-            logger.info(f"[TRADE {trade_id}] 🛑 SL placed for {symbol}: stop={sl_price_str}, limit={stop_limit_price}, qty={qty_str}")
-            return True
+            try:
+                send_signed_request("POST", "/sapi/v1/margin/order", params)
+                logger.info(f"[TRADE {trade_id}] 🛑 SL placed for {symbol}: stop={sl_price_str}, limit={stop_limit_price}, qty={qty_str}")
+                return True
+
+            except Exception as e:
+                logger.error(f"⚠️ Could not place SL for {symbol}: {e}")
+                return False
 
         # --- TP ONLY ---
         if order_type == "TP_ONLY":
+            # 🎯 TP PARAMS
             params = {
                 "symbol": symbol,
                 "side": oco_side,
@@ -955,48 +1186,33 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
                 "quantity": qty_str,
                 "price": tp_price_str,
                 "timeInForce": "GTC",
-                "timestamp": _now_ms()}
+                "timestamp": _now_ms()
+            }
 
-            send_signed_request("POST", "/sapi/v1/margin/order", params)
-            logger.info(f"[TRADE {trade_id}] 🎯 TP placed for {symbol}: price={tp_price_str}, qty={qty_str}")
-            return True
+            try:
+                send_signed_request("POST", "/sapi/v1/margin/order", params)
+                logger.info(f"[TRADE {trade_id}] 🎯 TP placed for {symbol}: price={tp_price_str}, qty={qty_str}")
+                return True
+
+            except Exception as e:
+                logger.error(f"⚠️ Could not place TP for {symbol}: {e}")
+                return False
 
     except Exception as e:
         logger.error(f"⚠️ Could not place SL/TP for {symbol}: {e}")
         return False
 
 
-# ====== DEPLOY LOADING ======
-"""Loads Binance exchange info on startup and logs the deploy timestamp."""
-
-# --- EXCHANGE INFO ---
-EXCHANGE_INFO = None
-
-# --- LOAD EXCANGE INFO ---
-def load_exchange_info():
-    global EXCHANGE_INFO
-
-    logger.info("📡 Loading exchange info...")
-    EXCHANGE_INFO = send_public_request("GET", "/api/v3/exchangeInfo")
-    logger.info("✅ Exchange info loaded")
-
-try:
-    load_exchange_info()
-except Exception as e:
-    logger.error(f"❌ Error loading exchange info: {e}")
-    raise
-
-# --- LOG DEPLOY ---
-deploy_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-logger.info(f"🚀 Deployed at {deploy_time}")
-logger.info(f"________________________________________")
-
-
 # ====== SNAPSHOT METRICS ======
 """Periodic account snapshots stored in memory for the metrics dashboard: balance, margin level, debt, and trade activity."""
 
+# --- SNAPSHOT PLACEHOLDERS
 SNAPSHOT_HISTORY = []
 SNAPSHOT_LOCK = Lock()
+
+# --- SNAPSHOT VARIABLES ---
+SNAPSHOT_INTERVAL = int(os.getenv("SNAPSHOT_INTERVAL", "1"))
+MAX_SNAPSHOTS = int(os.getenv("MAX_SNAPSHOTS", "500"))
 
 # --- SNAPSHOT THREADING ---
 def start_snapshot_workers():
@@ -1008,13 +1224,21 @@ def store_snapshot(snapshot):
     global SNAPSHOT_HISTORY
 
     with SNAPSHOT_LOCK:
+        # 📸 CLEAN SNAPSHOT
         clean_snapshot = {
+            # ⌚ TIME
             "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+
+            # 💰 BALANCE
             "totalBalanceUSDC": snapshot["totalBalanceUSDC"],
-            "marginLevel": snapshot["marginLevel"],
-            "totalDebt": snapshot["totalDebt"],
             "usdcBalance": snapshot["usdcBalance"],
+            "totalDebt": snapshot["totalDebt"],
             "usdcBorrowed": snapshot["usdcBorrowed"],
+
+            # ⚖ RISK
+            "marginLevel": snapshot["marginLevel"],
+
+            # 📈 ACTIVITY
             "longsToday": snapshot["longsToday"],
             "shortsToday": snapshot["shortsToday"],
             "totalLongs": snapshot["totalLongs"],
@@ -1026,16 +1250,12 @@ def store_snapshot(snapshot):
         if len(SNAPSHOT_HISTORY) > MAX_SNAPSHOTS:
             SNAPSHOT_HISTORY.pop(0)
 
-# --- AUXILIAR GET FUNCTIONS FOR SNAPSHOT ---
-def get_margin_account():
-    params = {}
-    acc = send_signed_request("GET", "/sapi/v1/margin/account", params)
-    return acc
-
+# --- GETTING BTCUSDC PRICE FOR SNAPSHOT
 def get_btc_usdc_price():
     try:
         r = _request_with_retries("GET", f"{BASE_URL}/api/v3/ticker/price", params={"symbol": "BTCUSDC"})
         return float(r["price"])
+
     except Exception as e:
         logger.error(f"⚠️ BTC price fetch failed: {e}")
         raise
@@ -1067,7 +1287,9 @@ def build_snapshot():
     total_balance_usdc = float(acc["totalNetAssetOfBtc"]) * btc_usdc_price
     margin_level = float(acc["marginLevel"])
 
+    # 🏷 ACCOUNT SNAPSHOT
     snapshot = {
+        # ⌚ TIME
         "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
 
         # 💰 BALANCE
@@ -1077,7 +1299,7 @@ def build_snapshot():
         "usdcBorrowed": round(usdc_borrowed, 8),
         "assetsWithBalance": assets_with_balance,
 
-        # ⚖️ RISK
+        # ⚖ RISK
         "marginLevel": margin_level,
 
         # 📈 ACTIVITY
@@ -1085,14 +1307,18 @@ def build_snapshot():
         "shortsToday": DAILY_SHORTS,
         "totalLongs": TOTAL_LONGS,
         "totalShorts": TOTAL_SHORTS,
-        "tradeId": TRADE_COUNTER
+        "tradeId": TRADE_COUNTER,
     }
 
+    # 🐍 VARIABLES SNAPSHOT
     snapshot["variables"] = {
+        # 🎚 BOOL VARS
         "trading": TRADING,
         "testnet": TESTNET,
         "sl_override": SL_OVERRIDE,
         "tp_override": TP_OVERRIDE,
+
+        # 🔢 ENV VARS
         "sl_pct": SL_PCT,
         "tp_pct": TP_PCT,
         "retries": RETRIES,
@@ -1101,37 +1327,70 @@ def build_snapshot():
         "log_view": LOG_VIEW,
         "login_limit": LOGIN_LIMIT,
         "login_retry": LOGIN_RETRY,
-        "session_timeout": SESSION_TIMEOUT
+        "session_time": SESSION_TIME,
     }
 
     return snapshot
 
-# --- GENERAL SNAPSHOT EXECUTION ---
+# --- SNAPSHOT WORKERS ---
 def snapshot_worker():
     while True:
         try:
             snapshot = build_snapshot()
             store_snapshot(snapshot)
             logger.info("📸 Snapshot stored")
+
         except Exception as e:
             logger.error(f"⚠️ Snapshot error: {e}")
         finally:
             logger.info(f"⏱ Next snapshot in {SNAPSHOT_INTERVAL} day(s)")
             time.sleep(SNAPSHOT_INTERVAL * 86400)
 
+# --- SNAPSHOT EXECUTION ---
 try:
     start_snapshot_workers()
+
 except Exception as e:
     logger.error(f"❌ Error starting snapshot workers: {e}")
     raise
 
 
+# ====== DEPLOY LOADING ======
+"""Loads Binance exchange info on startup and logs the deploy timestamp."""
+
+# --- EXCHANGE INFO ---
+EXCHANGE_INFO = None
+
+# --- LOAD EXCANGE INFO ---
+def load_exchange_info():
+    global EXCHANGE_INFO
+
+    logger.info("📡 Loading exchange info...")
+    EXCHANGE_INFO = send_public_request("GET", "/api/v3/exchangeInfo")
+    logger.info("ℹ Exchange info loaded")
+
+# --- EXCHANGE INFO LOADING ---
+try:
+    load_exchange_info()
+
+except Exception as e:
+    logger.error(f"❌ Error loading exchange info: {e}")
+    raise
+
+# --- LOG DEPLOY ---
+deploy_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+logger.info(f"🚀 Deployed at {deploy_time}")
+logger.info(f"________________________________________")
+
+
 # ====== MILESTONES ======
 """Detects and logs balance milestones (500, 1000, 2000... USDC) as they are reached for the first time."""
 
+# --- MILESTONES SETTINGS ---
 MILESTONES_USDC = [500, 1000, 2000, 5000, 10000, 25000, 50000]
 REACHED_MILESTONES = set()
 
+# --- CHECK MILESTONES ---
 def check_milestones(total_balance_usdc: float):
     new_milestones = []
 
@@ -1140,9 +1399,12 @@ def check_milestones(total_balance_usdc: float):
             REACHED_MILESTONES.add(milestone)
             new_milestones.append(milestone)
 
+            # 🎉 MILESTONES LOGGER
             logger.info(
-                f"🎉🎉 CONGRATS! You reached {milestone:,.0f} USDC 🎉🎉 \n"
-                f"🚀 Keep it up. Compounding is working. Discipline > Luck\n"
+                f"🎉🎉 CONGRATS! 🎉🎉\n"
+                f"💰 You reached {milestone:,.0f} USDC\n"
+                f"🚀 Keep it up. Compounding is working\n" 
+                f"🔥 Discipline > Luck\n"
             )
 
     return new_milestones
@@ -1151,26 +1413,45 @@ def check_milestones(total_balance_usdc: float):
 # ====== CENSORING KEYS ======
 """Redacts sensitive fields (admin_key, trading_key) from logged payloads."""
 
+# --- SENSITIVE FIELDS ---
 SENSITIVE_FIELDS = {"admin_key", "trading_key"}
 
+# --- SANITIZE PAYLOAD ---
 def sanitize_payload(payload: dict) -> dict:
     clean = payload.copy()
     for field in SENSITIVE_FIELDS:
         if field in clean:
-            clean[field] = "***REDACTED***"
+            clean[field] = "******"
     return clean
 
 
-# ====== ADMINISTRATIVE ======
-"""Administrative operations: clear positions, read account snapshot, borrow/repay USDC, toggle trading parameters, and restore defaults."""
+# ====== ADMIN FUNCTIONS ======
+"""Administrative operations: clear positions, borrow/repay USDC, toggle trading parameters, and restore defaults."""
 
-# --- ADMIN FUNCTIONS ---
+def set_dry_run(state):
+    global DRY_RUN
+
+    if state == "on":
+        DRY_RUN = True
+        logger.admin("🧪 ADMIN ACTION: DRY RUN enabled — cleanup only, no orders")
+    elif state == "off":
+        DRY_RUN = False
+        logger.admin("✅ ADMIN ACTION: DRY RUN disabled — full trading restored")
+    else:
+        return {"status": "error", "msg": "invalid state"}
+
+    return {"status": "ok", "dry_run": DRY_RUN}
+
+# --- ADMIN CLEAR ---
 def clear(symbol=None):
     if symbol:
         logger.admin(f"🔁 ADMIN ACTION: Converting {symbol} to USDC...")
+        cancel(symbol)
     else:
-        logger.admin("🔁 ADMIN_ACTION: Converting ALL assets to USDC...")
+        logger.admin("🔁 ADMIN ACTION: Converting ALL assets to USDC...")
+        cancel_all()
 
+    time.sleep(1)
     account = get_margin_account()
     cleared_symbols = []
     failed_symbols = []
@@ -1178,8 +1459,10 @@ def clear(symbol=None):
     for asset in account["userAssets"]:
         asset_name = asset["asset"]
         free_qty = float(asset["free"])
+        locked_qty = float(asset["locked"])
+        borrowed_qty = float(asset["borrowed"])
 
-        if asset_name == "USDC" or free_qty <= 0:
+        if asset_name == "USDC":
             continue
 
         asset_symbol = f"{asset_name}USDC"
@@ -1187,14 +1470,18 @@ def clear(symbol=None):
         if symbol and asset_symbol != symbol:
             continue
 
+        if free_qty <= 0 and locked_qty <= 0:
+            continue
+
         try:
             get_symbol_lot(asset_symbol)
+
         except:
             logger.error(f"⚠️ No USDC pair for {asset_name}, skipping")
             continue
 
         try:
-            logger.admin(f"↪ Clearing {free_qty} {asset_name}")
+            logger.info(f"➡ Clearing {asset_name} (free={free_qty}, locked={locked_qty}, borrowed={borrowed_qty})")
             handle_pre_trade_cleanup(asset_symbol)
             cleared_symbols.append(asset_symbol)
 
@@ -1202,59 +1489,10 @@ def clear(symbol=None):
             logger.error(f"⚠️ Could not convert {asset_symbol}: {e}")
             failed_symbols.append({"symbol": asset_symbol, "error": str(e)})
 
-    logger.admin("✅ CLEAR completed")
+    logger.info("✅ CLEAR completed")
     return {"cleared": cleared_symbols, "failed": failed_symbols}
 
-def plural(value, singular, plural=None):
-    if plural is None:
-        plural = singular + "s"
-    return singular if value == 1 else plural
-
-def read():
-    logger.admin("📊 ADMIN ACTION: Reading Cross Margin account snapshot...")
-    snapshot = build_snapshot()
-    logger.admin("────────── 📊 ACCOUNT VARIABLES 📊 ──────────")
-    logger.admin(f"├─ 🤖 Trading              : {TRADING}")
-    logger.admin(f"├─ 🧪 Testnet Mode         : {TESTNET}")
-    logger.admin(f"├─ 🟥 Stop Loss Override   : {SL_OVERRIDE}")
-    logger.admin(f"├─ 🟩 Take Profit Override : {TP_OVERRIDE}")
-    logger.admin(f"├─ 🔴 Stop Loss Value      : {SL_PCT} %")
-    logger.admin(f"├─ 🟢 Take Profit Value    : {TP_PCT} %")
-    logger.admin(f"├─ 🔄 Retries Value        : {RETRIES}")
-    logger.admin("────────── 📊 ADMIN VARIABLES 📊 ──────────")
-    logger.admin(f"├─ 📸 Snapshot Interval    : Every {SNAPSHOT_INTERVAL} {plural(SNAPSHOT_INTERVAL, 'day')}")
-    logger.admin(f"├─ 💾 Max Snapshot Storage : {MAX_SNAPSHOTS} {plural(MAX_SNAPSHOTS, 'snapshot')}")
-    logger.admin(f"├─ 📠 Log Preview Amount   : {LOG_VIEW} {plural(LOG_VIEW, 'log')}")
-    logger.admin(f"├─ 🔑 Login Attempt Limit  : {LOGIN_LIMIT} {plural(LOGIN_LIMIT, 'attempt')}")
-    logger.admin(f"├─ ⏱ Login Retry Period   : {LOGIN_RETRY} {plural(LOGIN_RETRY, 'minute')}")
-    logger.admin(f"├─ ⏳ Admin Session Timeout : {SESSION_TIMEOUT} {plural(SESSION_TIMEOUT, 'minute')}")
-    logger.admin("────────── 📊 TRADING STATUS 📊 ──────────")
-    logger.admin(f"├─ 📢 Last Trade ID        : Trade No. {snapshot['tradeId']}")
-    logger.admin(f"├─ 📈 Longs Today          : {snapshot['longsToday']}")
-    logger.admin(f"├─ 📉 Shorts Today         : {snapshot['shortsToday']}")
-    logger.admin(f"├─ 📈 Total Longs          : {snapshot['totalLongs']}")
-    logger.admin(f"├─ 📉 Total Shorts         : {snapshot['totalShorts']}")
-    logger.admin(f"├─ ⌚ Last Trade           : {LAST_TRADE}")
-    logger.admin("────────── 📊 ACCOUNT SNAPSHOT 📊 ──────────")
-    logger.admin(f"├─ 💰 Total Balance (USDC) : {snapshot['totalBalanceUSDC']:.8f} $")
-    logger.admin(f"├─ 💵 USDC Balance         : {snapshot['usdcBalance']:.8f} $")
-    logger.admin(f"├─ 💳 USDC Borrowed        : {snapshot['usdcBorrowed']:.8f} $")
-    logger.admin(f"├─ 💸 Total Debt           : {snapshot['totalDebt']:.8f} $")
-    logger.admin(f"├─ ⚖️ Margin Level         : {snapshot['marginLevel']}")
-
-    if snapshot["totalDebt"] == 0 and snapshot["marginLevel"] == 999.00:
-        logger.admin("├─ ✅ No debt")
-
-    logger.admin(f"├─ 🧾 Assets with balance:")
-    for a in snapshot['assetsWithBalance']:
-        logger.admin(f"│   ├─ {a['asset']} : {a['balance']}")
-
-    logger.admin("──────────────────────────────────────────────")
-
-    milestones = check_milestones(snapshot["totalBalanceUSDC"])
-    snapshot["milestonesReached"] = milestones
-    return snapshot
-
+# --- ADMIN BORROW ---
 def borrow(amount: float):
     logger.admin(f"📥 ADMIN ACTION: Borrow requested: {amount} USDC")
 
@@ -1263,20 +1501,24 @@ def borrow(amount: float):
 
     acc = get_margin_account()
     margin_level = float(acc["marginLevel"])
-    logger.admin(f"🧮 Current Margin Level: {margin_level:.2f}")
+    logger.admin(f"🧮 Current ML: {margin_level:.2f}")
 
-    if margin_level < 2:
+    if margin_level < ML_WARNING:
+        logger.error(f"⚠️ Margin level too low for leveraging")
         raise Exception("❌ Margin level too low to safely borrow USDC")
 
+    # 📥 LEVERAGE PARAMS
     params = {
         "asset": "USDC",
         "amount": format(amount, "f"),
-        "timestamp": _now_ms()}
+        "timestamp": _now_ms()
+    }
 
     resp = send_signed_request("POST", "/sapi/v1/margin/loan", params)
     logger.admin(f"✅ BORROW completed: {amount} USDC")
     return resp
 
+# --- ADMIN REPAY ---
 def repay(amount):
     logger.admin(f"💳 ADMIN ACTION: Repay requested: {amount}")
 
@@ -1301,15 +1543,18 @@ def repay(amount):
     if amount <= 0:
         raise ValueError("Repay amount must be > 0")
 
+    # 💳 REPAY LEVERAGE PARAMS
     params = {
         "asset": "USDC",
         "amount": format(amount, "f"),
-        "timestamp": _now_ms()}
+        "timestamp": _now_ms()
+    }
 
     resp = send_signed_request("POST", "/sapi/v1/margin/repay", params)
     logger.admin(f"✅ REPAY completed: {amount} USDC")
     return resp
 
+# --- ADMIN TRADING ---
 def set_trading_state(state):
     global TRADING
 
@@ -1324,6 +1569,7 @@ def set_trading_state(state):
 
     return {"status": "ok", "trading": TRADING}
 
+# --- ADMIN TESTNET ---
 def set_testnet_state(state):
     global TESTNET
 
@@ -1338,34 +1584,27 @@ def set_testnet_state(state):
 
     return {"status": "ok", "testnet": TESTNET}
 
+# --- ADMIN SET SL ---
 def set_sl(state=None, value=None):
     global SL_OVERRIDE, SL_PCT
 
     if state is not None:
         if state == "on":
             SL_OVERRIDE = True
-            logger.admin("🟢 ADMIN_ACTION: SL override ENABLED")
+            logger.admin("🟢 ADMIN ACTION: SL override ENABLED")
         elif state == "off":
             SL_OVERRIDE = False
-            logger.admin("🔴 ADMIN_ACTION: SL override DISABLED")
+            logger.admin("🔴 ADMIN ACTION: SL override DISABLED")
         else:
             return {"status": "error", "msg": "invalid state"}
-
         return {"status": "ok", "sl_override": SL_OVERRIDE}
 
     if value is not None:
-
-        try:
-            value = float(value)
-        except:
-            return {"status": "error", "msg": "invalid SL value"}
-
-        SL_PCT = max(0.1, min(value, 50))
-        logger.admin(f"🛠️ ADMIN ACTION: SL value updated → {SL_PCT}")
-        return {"status": "ok", "sl_value": SL_PCT}
+        return set_var("sl_pct", value)
 
     return {"status": "error", "msg": "no state or value provided"}
 
+# --- ADMIN SET TP ---
 def set_tp(state=None, value=None):
     global TP_OVERRIDE, TP_PCT
 
@@ -1378,104 +1617,34 @@ def set_tp(state=None, value=None):
             logger.admin("🔴 ADMIN ACTION: TP override DISABLED")
         else:
             return {"status": "error", "msg": "invalid state"}
-
         return {"status": "ok", "tp_override": TP_OVERRIDE}
 
     if value is not None:
-
-        try:
-            value = float(value)
-        except:
-            return {"status": "error", "msg": "invalid TP value"}
-
-        TP_PCT = max(0.1, min(value, 50))
-        logger.admin(f"🛠️ ADMIN ACTION: TP value updated → {TP_PCT}")
-        return {"status": "ok", "tp_value": TP_PCT}
+        return set_var("tp_pct", value)
 
     return {"status": "error", "msg": "no state or value provided"}
 
-def set_retries(value=None):
-    global RETRIES
+# --- ADMIN SET VAR ---
+def set_var(var_name, value):
+    if var_name not in SETTABLE_VARS:
+        return {"status": "error", "msg": f"unknown variable: {var_name}"}
 
-    if value is not None:
+    meta = SETTABLE_VARS[var_name]
 
-        try:
-            value = int(value)
-        except:
-            return {"status": "error", "msg": "invalid RETRIES value"}
+    try:
+        value = meta["type"](value)
 
-        RETRIES = max(1, min(value, 5))
-        logger.admin(f"🛠️ ADMIN ACTION: RETRIES value updated → {RETRIES}")
-        return {"status": "ok", "retries_value": RETRIES}
+    except Exception:
+        return {"status": "error", "msg": f"invalid value for {var_name}"}
 
-    return {"status": "error", "msg": "no state or value provided"}
+    value = max(meta["min"], min(value, meta["max"]))
+    globals()[meta["var"]] = value
+    logger.admin(f"🛠️ ADMIN ACTION: {meta['var']} updated → {value}")
+    return {"status": "ok", var_name: value}
 
-def set_log_view(value=None):
-    global LOG_VIEW
-
-    if value is not None:
-
-        try:
-            value = int(value)
-        except:
-            return {"status": "error", "msg": "invalid LOG_VIEW value"}
-
-        LOG_VIEW = max(0, min(value, 100))
-        logger.admin(f"🛠️ ADMIN ACTION: LOG_VIEW value updated → {LOG_VIEW}")
-        return {"status": "ok", "log_view_value": LOG_VIEW}
-
-    return {"status": "error", "msg": "no state or value provided"}
-
-def set_login_limit(value=None):
-    global LOGIN_LIMIT
-
-    if value is not None:
-
-        try:
-            value = int(value)
-        except:
-            return {"status": "error", "msg": "invalid LOGIN_LIMIT value"}
-
-        LOGIN_LIMIT = max(1, min(value, 15))
-        logger.admin(f"🛠️ ADMIN ACTION: LOGIN_LIMIT value updated → {LOGIN_LIMIT}")
-        return {"status": "ok", "login_limit_value": LOGIN_LIMIT}
-
-    return {"status": "error", "msg": "no state or value provided"}
-
-def set_login_retry(value=None):
-    global LOGIN_RETRY
-
-    if value is not None:
-
-        try:
-            value = int(value)
-        except:
-            return {"status": "error", "msg": "invalid LOGIN_RETRY value"}
-
-        LOGIN_RETRY = max(1, min(value, 15))
-        logger.admin(f"🛠️ ADMIN ACTION: LOGIN_RETRY value updated → {LOGIN_RETRY}")
-        return {"status": "ok", "login_retry_value": LOGIN_RETRY}
-
-    return {"status": "error", "msg": "no state or value provided"}
-
-def set_session_timeout(value=None):
-    global SESSION_TIMEOUT
-
-    if value is not None:
-
-        try:
-            value = int(value)
-        except:
-            return {"status": "error", "msg": "invalid SESSION_TIMEOUT value"}
-
-        SESSION_TIMEOUT = max(1, min(value, 15))
-        logger.admin(f"🛠️ ADMIN ACTION: SESSION_TIMEOUT value updated → {SESSION_TIMEOUT}")
-        return {"status": "ok", "session_timeout_value": SESSION_TIMEOUT}
-
-    return {"status": "error", "msg": "no state or value provided"}
-
+# --- ADMIN RESTORE ---
 def restore():
-    global SL_PCT, TP_PCT, RETRIES, LOG_VIEW, TRADING, TESTNET, SL_OVERRIDE, TP_OVERRIDE, LOGIN_LIMIT, LOGIN_RETRY, SESSION_TIMEOUT
+    global SL_PCT, TP_PCT, RETRIES, LOG_VIEW, TRADING, TESTNET, SL_OVERRIDE, TP_OVERRIDE, LOGIN_LIMIT, LOGIN_RETRY, SESSION_TIME
 
     logger.admin("🛠️ ADMIN ACTION: RESTORE default trading parameters")
     TRADING = DFT_TRADING
@@ -1488,7 +1657,7 @@ def restore():
     LOG_VIEW = DFT_LOG_VIEW
     LOGIN_LIMIT = DFT_LOGIN_LIMIT
     LOGIN_RETRY = DFT_LOGIN_RETRY
-    SESSION_TIMEOUT = DFT_SESSION_TIMEOUT
+    SESSION_TIME = DFT_SESSION_TIME
     logger.admin(f"🔄 TRADING restored → {TRADING}")
     logger.admin(f"🔄 TESTNET restored → {TESTNET}")
     logger.admin(f"🔄 SL_OVERRIDE restored → {SL_OVERRIDE}")
@@ -1499,7 +1668,7 @@ def restore():
     logger.admin(f"🔄 LOG_VIEW restored → {LOG_VIEW}")
     logger.admin(f"🔄 LOGIN_LIMIT restored → {LOGIN_LIMIT}")
     logger.admin(f"🔄 LOGIN_RETRY restored → {LOGIN_RETRY}")
-    logger.admin(f"🔄 SESSION_TIMEOUT restored → {SESSION_TIMEOUT}")
+    logger.admin(f"🔄 SESSION_TIME restored → {SESSION_TIME}")
     return {
         "TRADING": TRADING,
         "TESTNET": TESTNET,
@@ -1512,26 +1681,34 @@ def restore():
         "LOG_VIEW": LOG_VIEW,
         "LOGIN_LIMIT": LOGIN_LIMIT,
         "LOGIN_RETRY": LOGIN_RETRY,
-        "SESSION_TIMEOUT": SESSION_TIMEOUT
+        "SESSION_TIME": SESSION_TIME,
     }
 
+# ====== ADMIN PAYLOADS ======
+"""Registry mapping admin action names to their handler functions and variables subjet to post-deploy setting."""
 
 # --- ADMIN ACTIONS ---
 ADMIN_ACTIONS = {
     "CLEAR": clear,
-    "READ": read,
     "BORROW": borrow,
     "REPAY": repay,
     "TRADING": set_trading_state,
     "TESTNET": set_testnet_state,
     "SL": set_sl,
     "TP": set_tp,
-    "RETRIES": set_retries,
-    "LOG_VIEW": set_log_view,
-    "LOGIN_LIMIT": set_login_limit,
-    "LOGIN_RETRY": set_login_retry,
-    "SESSION_TIMEOUT": set_session_timeout,
-    "RESTORE": restore
+    "SET": set_var,
+    "RESTORE": restore,
+}
+
+# --- SETTABLE VARS ---
+SETTABLE_VARS = {
+    "sl_pct":       {"type": float, "min": MIN_SL_PCT,       "max": MAX_SL_PCT,       "var": "SL_PCT"},
+    "tp_pct":       {"type": float, "min": MIN_TP_PCT,       "max": MAX_TP_PCT,       "var": "TP_PCT"},
+    "retries":      {"type": int,   "min": MIN_RETRIES,      "max": MAX_RETRIES,      "var": "RETRIES"},
+    "log_view":     {"type": int,   "min": MIN_LOG_VIEW,     "max": MAX_LOG_VIEW,     "var": "LOG_VIEW"},
+    "login_limit":  {"type": int,   "min": MIN_LOGIN_LIMIT,  "max": MAX_LOGIN_LIMIT,  "var": "LOGIN_LIMIT"},
+    "login_retry":  {"type": int,   "min": MIN_LOGIN_RETRY,  "max": MAX_LOGIN_RETRY,  "var": "LOGIN_RETRY"},
+    "session_time": {"type": int,   "min": MIN_SESSION_TIME, "max": MAX_SESSION_TIME, "var": "SESSION_TIME"},
 }
 
 
@@ -1546,6 +1723,7 @@ LOGIN_ATTEMPTS = {}
 def get_ip():
     if request.headers.get("X-Forwarded-For"):
         return request.headers.get("X-Forwarded-For").split(",")[0].strip()
+
     return request.remote_addr
 
 # --- ADMIN SESSION OPENING ---
@@ -1557,7 +1735,7 @@ def create_admin_session(ip):
 def destroy_admin_session(ip):
     if ip in ADMIN_SESSIONS:
         del ADMIN_SESSIONS[ip]
-        logger.admin(f"🔒 Admin session closed for {ip}")
+        logger.admin(f"🔐 Admin session closed for {ip}")
 
 # --- ADMIN SESSION EXPIRING ---
 def is_admin_authenticated():
@@ -1568,7 +1746,7 @@ def is_admin_authenticated():
 
     last_activity = ADMIN_SESSIONS[ip]
 
-    if time.time() - last_activity > (SESSION_TIMEOUT * 60):
+    if time.time() - last_activity > (SESSION_TIME * 60):
         logger.admin(f"🔒 Admin session expired for {ip}")
         del ADMIN_SESSIONS[ip]
         return False
@@ -1610,22 +1788,26 @@ TRADE_LOCK = threading.RLock()
 def webhook():
     try:
         data = request.get_json(force=True)
+
     except Exception:
         return jsonify({"error": "Invalid JSON"}), 400
 
     if not data:
         return jsonify({"error": "Empty payload"}), 400
 
-    logger.info(f"📩 Webhook received: {sanitize_payload(data)}")
+    logger.info(f"📩 JSON received: {sanitize_payload(data)}")
+    time.sleep(5)
     allowed, response = trading_guard()
 
     if not allowed:
         return response
 
+    # ❓ RETURN FOR MISSING DATA
     if "symbol" not in data or "side" not in data:
         logger.error("❓ Missing trading fields")
         return jsonify({"error": "Missing trading fields"}), 400
 
+    # 🚫 RETURN FOR INCORRECT KEY
     if TRADING_KEY:
         if data.get("trading_key") != TRADING_KEY:
             logger.error("🚫 Invalid or missing trading_key")
@@ -1642,8 +1824,7 @@ def process_trade(data):
     try:
         with TRADE_LOCK:
 
-            logger.info("🔒 TRADE LOCK ACQUIRED")
-
+            # ⛔ TRADING BLOCKING
             if not check_margin_level():
                 logger.error("⛔ Trading blocked (critical margin condition)")
                 return
@@ -1652,8 +1833,16 @@ def process_trade(data):
                 logger.error("⛔ Trading blocked by margin safety system")
                 return
 
+            # 🧹 PRE-TRADE CLEANUP
+            cancel(symbol)
             handle_pre_trade_cleanup(symbol)
 
+            if DRY_RUN:
+                logger.admin("🧪 DRY RUN active — cleanup done, skipping order execution")
+                logger.info(f"[DRY RUN] 🔓 TRADE LOCK RELEASED")
+                return
+
+            # 💹 MARKET BUY / SELL AND OCO
             if side == "BUY":
                 resp = execute_long_margin(symbol, webhook_data=data)
                 trade_id = resp.get("trade_id") if resp else "UNKNOWN"
@@ -1664,13 +1853,22 @@ def process_trade(data):
                 logger.error("⛔ Trading blocked due to invalid side")
                 return
 
+            # ⏳ LATENCY
             latency = time.time() - start
             logger.info(f"[TRADE {trade_id}] ⏳ Trade execution latency: {latency:.2f}s")
-            logger.info(f"[TRADE {trade_id}] 🔓 TRADE LOCK RELEASED")
 
     except Exception as e:
         logger.error(f"🔥 CRITICAL TRADE ERROR: {e}", exc_info=True)
 
+
+@app.route("/dry_run", methods=["GET"])
+def admin_dry_run():
+    if not is_admin_authenticated():
+        return handle_unauthorized()
+
+    state = request.args.get("state", "").lower()
+    result = set_dry_run(state)
+    return jsonify(result), 200
 
 @app.route("/clear", methods=["GET"])
 def admin_clear():
@@ -1678,17 +1876,8 @@ def admin_clear():
         return handle_unauthorized()
 
     symbol = request.args.get("symbol")
-    result = clear(symbol)
-    return jsonify({"status": "ok", "result": result}), 200
-
-
-@app.route("/read", methods=["GET"])
-def admin_read():
-    if not is_admin_authenticated():
-        return handle_unauthorized()
-
-    snapshot = read()
-    return jsonify(snapshot), 200
+    threading.Thread(target=clear, args=(symbol,)).start()
+    return jsonify({"status": "started"}), 200
 
 
 @app.route("/borrow", methods=["GET"])
@@ -1698,14 +1887,17 @@ def admin_borrow():
 
     try:
         amount = float(request.args.get("amount", 0))
+
     except:
         return jsonify ({"error": "Invalid amount"}), 400
 
     try:
         result = borrow(amount)
         return jsonify({"amount": amount, "result": result}), 200
+
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -1722,14 +1914,17 @@ def admin_repay():
     else:
         try:
             amount = float(amount_param)
+
         except:
             return jsonify({"error": "Invalid amount"}), 400
 
     try:
         result = repay(amount)
         return jsonify({"amount": amount, "result": result}), 200
+
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -1776,53 +1971,18 @@ def admin_tp():
     return jsonify(result), 200
 
 
-@app.route("/retries", methods=["GET"])
-def admin_retries():
+@app.route("/set", methods=["GET"])
+def admin_set():
     if not is_admin_authenticated():
         return handle_unauthorized()
 
+    var_name = request.args.get("var")
     value = request.args.get("value")
-    result = set_retries(value)
-    return jsonify(result), 200
 
+    if not var_name or value is None:
+        return jsonify({"status": "error", "msg": "missing var or value"}), 400
 
-@app.route("/log_view", methods=["GET"])
-def admin_log_view():
-    if not is_admin_authenticated():
-        return handle_unauthorized()
-
-    value = request.args.get("value")
-    result = set_log_view(value)
-    return jsonify(result), 200
-
-
-@app.route("/login_limit", methods=["GET"])
-def admin_login_limit():
-    if not is_admin_authenticated():
-        return handle_unauthorized()
-
-    value = request.args.get("value")
-    result = set_login_limit(value)
-    return jsonify(result), 200
-
-
-@app.route("/login_retry", methods=["GET"])
-def admin_login_retry():
-    if not is_admin_authenticated():
-        return handle_unauthorized()
-
-    value = request.args.get("value")
-    result = set_login_retry(value)
-    return jsonify(result), 200
-
-
-@app.route("/session_timeout", methods=["GET"])
-def admin_session_timeout():
-    if not is_admin_authenticated():
-        return handle_unauthorized()
-
-    value = request.args.get("value")
-    result = set_session_timeout(value)
+    result = set_var(var_name, value)
     return jsonify(result), 200
 
 
@@ -1843,7 +2003,7 @@ def admin_logout():
         return jsonify({"error": "admin_auth_required"}), 403
 
     destroy_admin_session(ip)
-    return jsonify({"status": "logged_out"}), 200
+    return jsonify({"status": "logged out"}), 200
 
 
 @app.route("/health", methods=["GET"])
@@ -1861,26 +2021,6 @@ def admin_snapshot():
     milestones = check_milestones(snapshot["totalBalanceUSDC"])
     snapshot["milestonesReached"] = milestones
     return jsonify(snapshot), 200
-
-
-@app.route("/logs_preview")
-def logs_preview():
-    if not is_admin_authenticated():
-        return jsonify({"error": "unauthorized"}), 403
-
-    log_files = sorted(
-        [f for f in os.listdir(".") if f.endswith(".log") and os.path.isfile(f)],
-        key=os.path.getmtime,
-        reverse=True
-    )
-
-    if not log_files or LOG_VIEW == 0:
-        return jsonify({"lines": []})
-
-    with open(log_files[0], "r", encoding="utf-8") as f:
-        lines = list(deque(f, maxlen=LOG_VIEW))
-
-    return jsonify({"lines": lines})
 
 
 @app.template_filter('log_class')
@@ -1944,7 +2084,7 @@ def index():
             <button class="theme-toggle" onclick="toggleTheme()" id="theme-btn">🌙</button>
         </div>
 
-        <img src="/static/sgntlogo.png" class="logo" alt="SGNT">
+        <img src="/static/sgntlogo.png" id="logo" class="logo" alt="SGNT">
         <div class="tagline">Automated margin trading system</div>
 
         <div class="cards">
@@ -1971,11 +2111,15 @@ def index():
                 const light = document.body.classList.toggle('light');
                 document.getElementById('theme-btn').textContent = light ? '☀️' : '🌙';
                 localStorage.setItem('sgnt-theme', light ? 'light' : 'dark');
+                const logo = document.getElementById('logo');
+                logo.src = light ? '/static/sgntlogo0.png' : '/static/sgntlogo.png';
+
             }
 
             if (localStorage.getItem('sgnt-theme') === 'light') {
                 document.body.classList.add('light');
                 document.getElementById('theme-btn').textContent = '☀️';
+                document.getElementById('logo').src = '/static/sgntlogo0.png';
             }
 
             async function loadHealth() {
@@ -2037,7 +2181,8 @@ def login():
                 reset_login_attempts(ip)
 
                 if request.is_json:
-                    return jsonify({"status": "authorized"}), 200
+                    return jsonify({"status": "logged in"}), 200
+
                 return redirect(url_for("dashboard"))
             else:
                 attempts.append(now)
@@ -2045,6 +2190,7 @@ def login():
 
                 if request.is_json:
                     return jsonify({"error": "Invalid admin key"}), 401
+
                 error = "Invalid admin key"
 
     html = """
@@ -2242,12 +2388,12 @@ def dashboard():
             <span class="dot" id="dot"></span>
             <span class="status-text" id="status-text">Loading...</span>
             <span class="tag tag-live" id="mode-tag">LIVE</span>
-            <img src="/static/sgnticon.png" class="icon" alt="SGNT" onclick="window.location.href='/'" style="cursor: pointer; width: 30px;">
+            <img src="/static/sgnticon.png" class="icon" alt="SGNT" onclick="window.location.href='/'" style="cursor: pointer; width: 25px;">
         </div>
         <div class="topbar-right">
-            <button class="theme-toggle" onclick="toggleTheme()" id="theme-btn">🌙</button>
             <button class="btn" onclick="loadData()">Update</button>
             <button class="btn btn-danger" onclick="doLogout()">Logout</button>
+            <button class="theme-toggle" onclick="toggleTheme()" id="theme-btn">🌙</button>
         </div>
     </div>
 
@@ -2304,24 +2450,24 @@ def dashboard():
             <div class="card-title">Parameters</div>
             <div style="font-size:11px;color:#64748b;margin-bottom:4px">SL % <span id="sl-val" style="color:#f1f5f9">—</span></div>
             <div class="input-row">
-                <input type="number" id="sl-input" placeholder="0.1–50" step="0.1" min="0.1" max="50">
-                <button class="btn-minmax" onclick="setInputVal('sl-input',0.1)">min</button>
-                <button class="btn-minmax" onclick="setInputVal('sl-input',50)">max</button>
+                <input type="number" id="sl-input" placeholder="{{ MIN_SL_PCT }}–{{ MAX_SL_PCT }}" step="0.1" min="{{ MIN_SL_PCT }}" max="{{ MAX_SL_PCT }}">
+                <button class="btn-minmax" onclick="setInputVal('sl-input',{{ MIN_SL_PCT }})">min</button>
+                <button class="btn-minmax" onclick="setInputVal('sl-input',{{ MAX_SL_PCT }})">max</button>
                 <button class="btn" onclick="setParam('sl','value',document.getElementById('sl-input').value)">Set</button>
             </div>
             <div style="font-size:11px;color:#64748b;margin:8px 0 4px">TP % <span id="tp-val" style="color:#f1f5f9">—</span></div>
             <div class="input-row">
-                <input type="number" id="tp-input" placeholder="0.1–50" step="0.1" min="0.1" max="50">
-                <button class="btn-minmax" onclick="setInputVal('tp-input',0.1)">min</button>
-                <button class="btn-minmax" onclick="setInputVal('tp-input',50)">max</button>
+                <input type="number" id="tp-input" placeholder="{{ MIN_TP_PCT }}–{{ MAX_TP_PCT }}" step="0.1" min="{{ MIN_TP_PCT }}" max="{{ MAX_TP_PCT }}">
+                <button class="btn-minmax" onclick="setInputVal('tp-input',{{ MIN_TP_PCT }})">min</button>
+                <button class="btn-minmax" onclick="setInputVal('tp-input',{{ MAX_TP_PCT }})">max</button>
                 <button class="btn" onclick="setParam('tp','value',document.getElementById('tp-input').value)">Set</button>
             </div>
             <div style="font-size:11px;color:#64748b;margin:8px 0 4px">Retries <span id="retries-val" style="color:#f1f5f9">—</span></div>
             <div class="input-row">
-                <input type="number" id="retries-input" placeholder="1–5" min="1" max="5">
-                <button class="btn-minmax" onclick="setInputVal('retries-input',1)">min</button>
-                <button class="btn-minmax" onclick="setInputVal('retries-input',5)">max</button>
-                <button class="btn" onclick="setParam('retries','value',document.getElementById('retries-input').value)">Set</button>
+                <input type="number" id="retries-input" placeholder="{{ MIN_RETRIES }}–{{ MAX_RETRIES }}" min="{{ MIN_RETRIES }}" max="{{ MAX_RETRIES }}">
+                <button class="btn-minmax" onclick="setInputVal('retries-input',{{ MIN_RETRIES }})">min</button>
+                <button class="btn-minmax" onclick="setInputVal('retries-input',{{ MAX_RETRIES }})">max</button>
+                <button class="btn" onclick="setVar('retries',document.getElementById('retries-input').value)">Set</button>
             </div>
         </div>
 
@@ -2352,36 +2498,36 @@ def dashboard():
             <div class="card-title">Logs</div>
             <div style="font-size:11px;color:#64748b;margin-bottom:4px">Log view <span id="log-view-val" style="color:#f1f5f9">—</span></div>
             <div class="input-row">
-                <input type="number" id="log-view-input" placeholder="0–100" min="0" max="100">
-                <button class="btn-minmax" onclick="setInputVal('log-view-input',0)">min</button>
-                <button class="btn-minmax" onclick="setInputVal('log-view-input',100)">max</button>
-                <button class="btn" onclick="setParam('log_view','value',document.getElementById('log-view-input').value)">Set</button>
+                <input type="number" id="log-view-input" placeholder="{{ MIN_LOG_VIEW }}–{{ MAX_LOG_VIEW }}" min="{{ MIN_LOG_VIEW }}" max="{{ MAX_LOG_VIEW }}">
+                <button class="btn-minmax" onclick="setInputVal('log-view-input',{{ MIN_LOG_VIEW }})">min</button>
+                <button class="btn-minmax" onclick="setInputVal('log-view-input',{{ MAX_LOG_VIEW }})">max</button>
+                <button class="btn" onclick="setVar('log_view',document.getElementById('log-view-input').value)">Set</button>
             </div>
             <div style="margin-top:10px"><a href="/logs"><button class="btn" style="width:100%">See logs</button></a></div>
         </div>
 
         <div class="card">
             <div class="card-title">Admin Session</div>
-            <div style="font-size:11px;color:#64748b;margin-bottom:4px">Session Timeout <span id="session-val" style="color:#f1f5f9">—</span> min</div>
+            <div style="font-size:11px;color:#64748b;margin-bottom:4px">Session Time <span id="session-val" style="color:#f1f5f9">—</span> min</div>
             <div class="input-row">
-                <input type="number" id="session-input" placeholder="1–15" min="1" max="15">
-                <button class="btn-minmax" onclick="setInputVal('session-input',1)">min</button>
-                <button class="btn-minmax" onclick="setInputVal('session-input',15)">max</button>
-                <button class="btn" onclick="setParam('session_timeout','value',document.getElementById('session-input').value)">Set</button>
+                <input type="number" id="session-input" placeholder="{{ MIN_SESSION_TIME }}–{{ MAX_SESSION_TIME }}" min="{{ MIN_SESSION_TIME }}" max="{{ MAX_SESSION_TIME }}">
+                <button class="btn-minmax" onclick="setInputVal('session-input',{{ MIN_SESSION_TIME }})">min</button>
+                <button class="btn-minmax" onclick="setInputVal('session-input',{{ MAX_SESSION_TIME }})">max</button>
+                <button class="btn" onclick="setVar('session_time',document.getElementById('session-input').value)">Set</button>
             </div>
             <div style="font-size:11px;color:#64748b;margin:8px 0 4px">Login Limit <span id="login-limit-val" style="color:#f1f5f9">—</span></div>
             <div class="input-row">
-                <input type="number" id="login-limit-input" placeholder="1–15" min="1" max="15">
-                <button class="btn-minmax" onclick="setInputVal('login-limit-input',1)">min</button>
-                <button class="btn-minmax" onclick="setInputVal('login-limit-input',15)">max</button>
-                <button class="btn" onclick="setParam('login_limit','value',document.getElementById('login-limit-input').value)">Set</button>
+                <input type="number" id="login-limit-input" placeholder="{{ MIN_LOGIN_LIMIT }}–{{ MAX_LOGIN_LIMIT }}" min="{{ MIN_LOGIN_LIMIT }}" max="{{ MAX_LOGIN_LIMIT }}">
+                <button class="btn-minmax" onclick="setInputVal('login-limit-input',{{ MIN_LOGIN_LIMIT }})">min</button>
+                <button class="btn-minmax" onclick="setInputVal('login-limit-input',{{ MAX_LOGIN_LIMIT }})">max</button>
+                <button class="btn" onclick="setVar('login_limit',document.getElementById('login-limit-input').value)">Set</button>
             </div>
             <div style="font-size:11px;color:#64748b;margin:8px 0 4px">Login Retry <span id="login-retry-val" style="color:#f1f5f9">—</span> min</div>
             <div class="input-row">
-                <input type="number" id="login-retry-input" placeholder="1–15" min="1" max="15">
-                <button class="btn-minmax" onclick="setInputVal('login-retry-input',1)">min</button>
-                <button class="btn-minmax" onclick="setInputVal('login-retry-input',15)">max</button>
-                <button class="btn" onclick="setParam('login_retry','value',document.getElementById('login-retry-input').value)">Set</button>
+                <input type="number" id="login-retry-input" placeholder="{{ MIN_LOGIN_RETRY }}–{{ MAX_LOGIN_RETRY }}" min="{{ MIN_LOGIN_RETRY }}" max="{{ MAX_LOGIN_RETRY }}">
+                <button class="btn-minmax" onclick="setInputVal('login-retry-input',{{ MIN_LOGIN_RETRY }})">min</button>
+                <button class="btn-minmax" onclick="setInputVal('login-retry-input',{{ MAX_LOGIN_RETRY }})">max</button>
+                <button class="btn" onclick="setVar('login_limit',document.getElementById('login-limit-input').value)">Set</button>
             </div>
         </div>
 
@@ -2463,9 +2609,19 @@ def dashboard():
             document.getElementById('total-shorts').textContent = fmtI(d.totalShorts);
 
             const assets = d.assetsWithBalance || [];
-            document.getElementById('assets-list').innerHTML = assets.length
-                ? assets.map(a => `<div class="asset-row"><span>${a.asset}</span><span style="font-family:'Courier New',monospace">${a.balance}</span></div>`).join('')
-                : '<span style="font-size:12px;color:#475569">No assets</span>';
+            const NOTIONAL_THRESHOLD = 1;
+            const above = assets.filter(a => a.balance >= NOTIONAL_THRESHOLD);
+            const below = assets.filter(a => a.balance < NOTIONAL_THRESHOLD);
+            let assetsHtml = '';
+            if (above.length) {
+                assetsHtml += above.map(a => `<div class="asset-row"><span>${a.asset}</span><span style="font-family:'Courier New',monospace">${a.balance}</span></div>`).join('');
+            }
+            if (below.length) {
+                if (above.length) assetsHtml += `<div style="border-top:0.5px solid #334155;margin:4px 0;opacity:0.4"></div>`;
+                assetsHtml += below.map(a => `<div class="asset-row" style="opacity:0.4"><span>${a.asset}</span><span style="font-family:'Courier New',monospace">${a.balance}</span></div>`).join('');
+            }
+            document.getElementById('assets-list').innerHTML = assetsHtml || '<span style="font-size:12px;color:#475569">No assets</span>';
+
 
             document.getElementById('tog-trading').checked = !!v.trading;
             document.getElementById('tog-testnet').checked = !!v.testnet;
@@ -2476,7 +2632,7 @@ def dashboard():
             document.getElementById('tp-val').textContent = v.tp_pct != null ? v.tp_pct + '%' : '—';
             document.getElementById('retries-val').textContent = v.retries != null ? v.retries : '—';
             document.getElementById('log-view-val').textContent = v.log_view != null ? v.log_view : '—';
-            document.getElementById('session-val').textContent = v.session_timeout != null ? v.session_timeout : '—';
+            document.getElementById('session-val').textContent = v.session_time != null ? v.session_time : '—';
             document.getElementById('login-limit-val').textContent = v.login_limit != null ? v.login_limit : '—';
             document.getElementById('login-retry-val').textContent = v.login_retry != null ? v.login_retry : '—';
 
@@ -2504,6 +2660,14 @@ def dashboard():
             if (!val) { toast('Insert value', false); return; }
             const d = await api(`/${param}?${key}=${val}`);
             if (d && d.status === 'ok') toast(`${param} updated`);
+            else toast('Error', false);
+            await loadData();
+        }
+
+        async function setVar(varName, val) {
+            if (!val && val !== 0) { toast('Insert value', false); return; }
+            const d = await api(`/set?var=${varName}&value=${val}`);
+            if (d && d.status === 'ok') toast(`${varName} updated`);
             else toast('Error', false);
             await loadData();
         }
@@ -2556,7 +2720,22 @@ def dashboard():
     </body>
     </html>
     """
-    return html
+    return render_template_string(html,
+    MIN_SL_PCT=MIN_SL_PCT,
+    MAX_SL_PCT=MAX_SL_PCT,
+    MIN_TP_PCT=MIN_TP_PCT,
+    MAX_TP_PCT=MAX_TP_PCT,
+    MIN_RETRIES=MIN_RETRIES,
+    MAX_RETRIES=MAX_RETRIES,
+    MIN_LOG_VIEW=MIN_LOG_VIEW,
+    MAX_LOG_VIEW=MAX_LOG_VIEW,
+    MIN_LOGIN_LIMIT=MIN_LOGIN_LIMIT,
+    MAX_LOGIN_LIMIT=MAX_LOGIN_LIMIT,
+    MIN_LOGIN_RETRY=MIN_LOGIN_RETRY,
+    MAX_LOGIN_RETRY=MAX_LOGIN_RETRY,
+    MIN_SESSION_TIME=MIN_SESSION_TIME,
+    MAX_SESSION_TIME=MAX_SESSION_TIME,
+)
 
 
 @app.route("/logs")
@@ -2574,6 +2753,7 @@ def logs():
             for f in os.listdir("."):
                 if f.endswith(".log") and os.path.isfile(f):
                     zf.write(f)
+
         memory_file.seek(0)
         return send_file(memory_file, as_attachment=True, download_name="sgnt_logs.zip", mimetype="application/zip")
 
@@ -2585,6 +2765,7 @@ def logs():
         if level:
             with open(filename, "r", encoding="utf-8") as f:
                 filtered_lines = [line for line in f if level in line]
+
             return Response(
                 "".join(filtered_lines),
                 mimetype="text/plain",
@@ -2601,12 +2782,14 @@ def logs():
             if f == "sgnt.log":
                 date_str = datetime.utcnow().strftime("%Y-%m-%d")
                 display_name = f"sgnt.{date_str}.log"
+
             log_files.append({
                 "name": f,
                 "display": display_name,
                 "size": f"{size_mb:.2f} MB",
                 "modified": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(modified))
             })
+
     log_files.sort(key=lambda x: x["modified"], reverse=True)
 
     latest_logs = []
@@ -2690,7 +2873,7 @@ def logs():
     <div class="topbar">
         <div class="topbar-left">
             <a href="/dashboard" class="btn">← Dashboard</a>
-            <img src="/static/sgnticon.png" class="icon" alt="SGNT" onclick="window.location.href='/'" style="cursor: pointer; width: 30px;">
+            <img src="/static/sgnticon.png" class="icon" alt="SGNT" onclick="window.location.href='/'" style="cursor: pointer; width: 25px;">
             <span class="topbar-title">Logs</span>
         </div>
         <div class="topbar-right">
@@ -2701,8 +2884,8 @@ def logs():
                 </label>
                 <span>Auto-refresh</span>
             </div>
-            <button class="theme-toggle" onclick="toggleTheme()" id="theme-btn">🌙</button>
             <a href="/logs?download=all" class="btn btn-blue">Download all</a>
+            <button class="theme-toggle" onclick="toggleTheme()" id="theme-btn">🌙</button>
         </div>
     </div>
 
@@ -2820,7 +3003,6 @@ def metrics():
         </html>
         """
 
-    import json
     return f"""
     <!DOCTYPE html>
     <html>
@@ -2864,7 +3046,7 @@ def metrics():
     <div class="topbar">
         <div class="topbar-left">
             <a href="/dashboard" class="btn">← Dashboard</a>
-            <img src="/static/sgnticon.png" class="icon" alt="SGNT" onclick="window.location.href='/'" style="cursor: pointer; width: 30px;">
+            <img src="/static/sgnticon.png" class="icon" alt="SGNT" onclick="window.location.href='/'" style="cursor: pointer; width: 25px;">
         </div>
         <div class="topbar-right">
             <span class="snapshot-count">{len(SNAPSHOT_HISTORY)} snapshots</span>
@@ -2962,10 +3144,59 @@ def metrics():
         options: commonOptions
     }});
 
+    const transform = (v) => Math.log10(v - 1);
+    const inverse = (v) => Math.pow(10, v) + 1;
+
+    const backgroundZonesPlugin = {{
+        id: 'backgroundZones',
+        beforeDraw: (chart) => {{
+            const {{ ctx, chartArea, scales: {{ y }} }} = chart;
+            if (!chartArea) return;
+
+            const drawZone = (yMin, yMax, color) => {{
+                const yTop = y.getPixelForValue(transform(yMax));
+                const yBottom = y.getPixelForValue(transform(yMin));
+
+                ctx.save();
+                ctx.fillStyle = color;
+                ctx.fillRect(
+                    chartArea.left,
+                    yTop,
+                    chartArea.right - chartArea.left,
+                    yBottom - yTop
+                );
+                ctx.restore();
+            }};
+
+            drawZone(1.25, 2, 'rgba(255, 255, 0, 0.2)');
+            drawZone(1.16, 1.25, 'rgba(255, 165, 0, 0.25)');
+            drawZone(1.1, 1.16, 'rgba(255, 0, 0, 0.25)');
+        }}
+    }};
+
     new Chart(document.getElementById('marginChart'), {{
         type: 'line',
-        data: {{labels, datasets: [dataset("Margin Level", "marginLevel", "#a78bfa")]}},
-        options: commonOptions
+        data: {{
+            labels,
+            datasets: [dataset("Margin Level", "marginLevel", "#a78bfa")]
+        }},
+        options: {{
+            ...commonOptions,
+            scales: {{
+                x: commonOptions.scales.x,
+                y: {{
+                    type: 'linear',
+                    min: transform(1.1),
+                    max: transform(1000),
+                    ticks: {{
+                        font: {{ size: 10 }},
+                        callback: (v) => inverse(v).toFixed(2)
+                    }},
+                    grid: {{ color: gridColor() }}
+                }}
+            }}
+        }},
+        plugins: [backgroundZonesPlugin]
     }});
 
     const activityDatasets = [];
@@ -2976,14 +3207,34 @@ def metrics():
         );
     }}
     activityDatasets.push(
-        {{type:'line', label:'Total Longs', data: data.map(d => d.totalLongs), borderColor:'#4ade80', tension:0.3, pointRadius:2}},
-        {{type:'line', label:'Total Shorts', data: data.map(d => d.totalShorts), borderColor:'#f87171', tension:0.3, pointRadius:2}},
-        {{type:'line', label:'Trades', data: data.map(d => d.tradeId), borderColor:'#e2e8f0', tension:0.3, pointRadius:2}}
+        {{type:'line', label:'Total Longs', data: data.map(d => d.totalLongs), borderColor:'#4ade80', tension:0.3, pointRadius:2, yAxisID:'y1'}},
+        {{type:'line', label:'Total Shorts', data: data.map(d => d.totalShorts), borderColor:'#f87171', tension:0.3, pointRadius:2, yAxisID:'y1'}},
+        {{type:'line', label:'Trades', data: data.map(d => d.tradeId), borderColor:'#e2e8f0', tension:0.3, pointRadius:2, yAxisID:'y1'}}
     );
 
     new Chart(document.getElementById('activityChart'), {{
-        data: {{labels, datasets: activityDatasets}},
-        options: commonOptions
+        data: {{ labels, datasets: activityDatasets }},
+        options: {{
+            responsive: true,
+            plugins: {{legend: {{labels: {{font: {{size: 11}}, boxWidth: 12}}}}}},
+            scales: {{
+                x: {{ticks: {{font: {{size: 10}}, maxTicksLimit: 8}}, grid: {{color: gridColor()}}}},
+                y: {{
+                    beginAtZero: true,
+                    stacked: SNAPSHOT_INTERVAL === 1,
+                    ticks: {{ font: {{ size: 10 }}, stepSize: 1 }},
+                    grid: {{ color: gridColor() }},
+                    title: {{ display: true, text: 'Daily', font: {{ size: 10 }}, color: '#475569' }}
+                }},
+                y1: {{
+                    beginAtZero: true,
+                    position: 'right',
+                    ticks: {{ font: {{ size: 10 }} }},
+                    grid: {{ drawOnChartArea: false }},
+                    title: {{ display: true, text: 'Total', font: {{ size: 10 }}, color: '#475569' }}
+                }}
+            }}
+        }}
     }});
     </script>
 
@@ -2997,4 +3248,3 @@ def metrics():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
-    
