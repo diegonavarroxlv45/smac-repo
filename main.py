@@ -58,7 +58,6 @@ TRADING = os.getenv("TRADING", "true").lower() == "true"
 TESTNET = os.getenv("TESTNET", "false").lower() == "true"
 SL_OVERRIDE = os.getenv("SL_OVERRIDE", "true").lower() == "true"
 TP_OVERRIDE = os.getenv("TP_OVERRIDE", "true").lower() == "true"
-DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 
 # --- ENVIRONMENT VARIABLES ---
 SL_PCT = float(os.getenv("SL_PCT", "2"))                     # %
@@ -69,7 +68,7 @@ LOGIN_LIMIT = int(os.getenv("LOGIN_LIMIT", "5"))             # NUMBER
 LOGIN_RETRY = int(os.getenv("LOGIN_RETRY", "5"))             # MINUTES
 SESSION_TIME = int(os.getenv("SESSION_TIME", "5"))           # MINUTES
 
-# --- VARIABLE MINS ---
+# --- VARIABLE LIMITS ---
 MIN_SL_PCT = 0.1                                             # %
 MIN_TP_PCT = 0.1                                             # %
 MIN_RETRIES = 1                                              # NUMBER
@@ -77,8 +76,6 @@ MIN_LOG_VIEW = 0                                             # NUMBER
 MIN_LOGIN_LIMIT = 1                                          # NUMBER
 MIN_LOGIN_RETRY = 1                                          # MINUTES
 MIN_SESSION_TIME = 1                                         # MINUTES
-
-# --- VARIABLE MAXS ---
 MAX_SL_PCT = 50                                              # %
 MAX_TP_PCT = 50                                              # %
 MAX_RETRIES = 5                                              # NUMBER
@@ -87,11 +84,9 @@ MAX_LOGIN_LIMIT = 15                                         # NUMBER
 MAX_LOGIN_RETRY = 15                                         # MINUTES
 MAX_SESSION_TIME = 15                                        # MINUTES
 
-# --- MARGIN LEVEL THRESHOLDS ---
-ML_WARNING = 2                                               # NUMBER
-ML_DANGER = 1.25                                             # NUMBER
-ML_CRITICAL = 1.16                                           # NUMBER
-ML_LIQUIDATION = 1.1                                         # NUMBER
+# --- SDP PERIODS ---
+BOOT_PERIOD = int(os.getenv("BOOT_PERIOD", "1"))             # MINUTES
+GRACE_PERIOD = int(os.getenv("GRACE_PERIOD", "2"))           # MINUTES
 
 # --- TRADE COUNTER VARIABLES ---
 TRADE_COUNTER = 0                                            # NUMBER
@@ -101,6 +96,25 @@ TOTAL_LONGS = 0                                              # NUMBER
 TOTAL_SHORTS = 0                                             # NUMBER
 CURRENT_DAY = datetime.utcnow().date()                       # NUMBER
 LAST_TRADE = None                                            # NUMBER
+
+# --- MARGIN LEVEL THRESHOLDS ---
+ML_WARNING = float(os.getenv("ML_WARNING", "2"))             # NUMBER
+ML_DANGER = float(os.getenv("ML_DANGER", "1.25"))            # NUMBER
+ML_CRITICAL = float(os.getenv("ML_CRITICAL", 1.16"))         # NUMBER
+ML_LIQUIDATION = float(os.getenv("ML_LIQUIDATION", "1.1"))   # NUMBER
+
+# --- RISK_PCT VARIABLES ---
+MAX_RISK_PCT = float(os.getenv("MAX_RISK_PCT", "20"))        # %
+MAX_RISK_PCT = max(0.1, min(MAX_RISK_PCT, 20))               # %
+DFT_RISK_PCT = float(os.getenv("DFT_RISK_PCT", "5"))         # %
+DFT_RISK_PCT = max(0.1, min(DFT_RISK_PCT, MAX_RISK_PCT))     # %
+
+# --- SL/TP COMISSION ---
+COMMISSION = Decimal(os.getenv("COMMISSION", "0.1"))         # %
+
+# --- SNAPSHOT VARIABLES ---
+SNAPSHOT_INTERVAL = int(os.getenv("SNAPSHOT_INTERVAL", "1")) # DAYS
+MAX_SNAPSHOTS = int(os.getenv("MAX_SNAPSHOTS", "500"))       # NUMBER
 
 # --- SECRET VARIABLES ---
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")               # API
@@ -202,10 +216,6 @@ LAST_HEALTH_CHECK = 0
 HEALTH_CHECK_INTERVAL = 10
 LAST_HEALTH_STATUS = False
 
-# --- SDP PERIODS ---
-BOOT_PERIOD = int(os.getenv("BOOT_PERIOD", "1"))
-GRACE_PERIOD = int(os.getenv("GRACE_PERIOD", "2"))
-
 # --- PUBLIC BINANCE REQUEST ---
 def send_public_request(http_method: str, path: str, params=None):
     url = f"{BASE_URL}{path}"
@@ -276,15 +286,13 @@ def is_bot_ready():
         return True
 
     uptime = time.time() - BOOT_TIME
-    BOOT_SECS = BOOT_PERIOD * 60
-    GRACE_SECS = GRACE_PERIOD * 60
 
-    if uptime < BOOT_SECS:
-        logger.info(f"⌛ Boot protection active ({int(uptime)}s/{BOOT_SECS}s)")
+    if uptime < (BOOT_PERIOD * 60):
+        logger.info(f"⌛ Boot protection active ({int(uptime)}s/{BOOT_PERIOD * 60}s)")
         return False
 
-    if uptime < GRACE_SECS:
-        logger.info(f"⏳ Deploy grace period ({int(uptime)}s/{GRACE_SECS}s)")
+    if uptime < (GRACE_PERIOD * 60):
+        logger.info(f"⏳ Deploy grace period ({int(uptime)}s/{GRACE_PERIOD * 60}s)")
         return False
 
     if not health_check_cached():
@@ -344,6 +352,10 @@ def _request_with_retries(method: str, url: str, **kwargs):
                 data = resp.text
 
             if isinstance(data, dict) and "code" in data:
+                # ⚠ ERROR -3045
+                if data["code"] == -3045:
+                    return data
+
                 # ⚠ ERROR -2011
                 if data["code"] == -2011:
                     return data
@@ -353,6 +365,10 @@ def _request_with_retries(method: str, url: str, **kwargs):
                     msg = data.get("msg", "").lower()
                     if "insufficient balance" in msg:
                          return data
+
+                # ⚠ ERROR -1013
+                if data["code"] == -1013:
+                    return data
 
             # ✅ 200 OK
             if resp.status_code == 200:
@@ -496,12 +512,6 @@ def tick_decimals(tick_str: str):
 # ====== CHECK MARGIN LEVEL BEFORE OPERATING ======
 """Pre-trade margin safety check: blocks or limits trading based on margin level thresholds, triggers controlled liquidation if critical."""
 
-# --- RISK_PCT VARIABLES ---
-MAX_RISK_PCT = float(os.getenv("MAX_RISK_PCT", "20"))
-MAX_RISK_PCT = max(0.1, min(MAX_RISK_PCT, 20))
-DFT_RISK_PCT = float(os.getenv("DFT_RISK_PCT", "5"))
-DFT_RISK_PCT = max(0.1, min(DFT_RISK_PCT, MAX_RISK_PCT))
-
 # --- PRE MARGIN STATUS ---
 TRADING_BLOCKED = False
 MARGIN_MAX_RISK_PCT = MAX_RISK_PCT
@@ -579,7 +589,19 @@ def resolve_risk_pct(webhook_data=None):
 # ====== PRE-TRADE CLEANUP ======
 """Before each trade: cancels open orders, repays outstanding debt, and sells residual asset balance back to USDC."""
 
-# --- CANCEL ORDERS FROM SYMBOL ---
+# --- PRE-TRADE CLEANUP ---
+def handle_pre_trade_cleanup(symbol: str):
+    base_asset = symbol.replace("USDC", "")
+
+    try:
+        cancel(symbol)
+        refund(symbol)
+        residual(symbol
+
+    except Exception as e
+        logger.error(f"⚠️ Couldn't handle pre-trade cleanup for {symbol}: {e}")
+
+# --- CANCEL ORDERS FROM PREVIOUS POSITIONS ---
 def cancel(symbol: str):
     base_asset = symbol.replace("USDC", "")
 
@@ -621,13 +643,12 @@ def cancel_all():
             cancel(symbol)
 
     except Exception as e:
-        logger.error(f"⚠️ cancel_all error: {e}")
+        logger.error(f"⚠️ Couldn't cancel all orders: {e}")
 
-# --- PRE-TRADE CLEANUP ---
-def handle_pre_trade_cleanup(symbol: str):
+# --- REFUND DEBT FROM PREVIOUS POSITIONS ---
+def refund(symbol: str):
     base_asset = symbol.replace("USDC", "")
 
-    # --- 1️⃣ Repay debt ---
     try:
         ts = _now_ms()
         q, sig = sign_params_query({"timestamp": ts}, BINANCE_API_SECRET)
@@ -724,7 +745,10 @@ def handle_pre_trade_cleanup(symbol: str):
     except Exception as e:
         logger.error(f"⚠️ Error during repay in {base_asset}: {e}")
 
-    # --- 2️⃣ Sell residual balance ---
+# --- SELL RESIDUAL FROM PREVIOUS POSITIONS ---
+def residual(symbol: str):
+    base_asset = symbol.replace("USDC", "")
+
     try:
         lot = get_symbol_lot(symbol)
 
@@ -820,7 +844,7 @@ def handle_pre_trade_cleanup(symbol: str):
                 logger.error(f"⚠️ NOTIONAL error while selling {base_asset} — qty too small or below minNotional")
                 return
 
-        logger.info(f"🧹 Sold residual {qty_str} {base_asset} to USDC")
+        logger.info(f"🧹 Sold residual {qty_str:.5f} {base_asset} to USDC")
 
     except Exception as e:
         logger.error(f"⚠️ Error selling residual {base_asset}: {e}")
@@ -1024,9 +1048,6 @@ def update_last_trade(symbol: str, side: str):
 # ====== SL/TP FUNCTIONS ======
 """Places OCO, stop-loss-only, or take-profit-only orders after trade execution, with tick-aligned prices and commission-adjusted quantities."""
 
-# --- SL/TP RELATED VARIABLES ---
-COMMISSION = Decimal(os.getenv("COMMISSION", "0.1"))
-
 # --- SL/TP PLACING ---
 def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty: float, lot: dict, sl_override=None, tp_override=None, trade_id=None):
     try:
@@ -1145,7 +1166,7 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
                 profit_tp = (tp_f - entry_f) * qty_f * direction
                 loss_sl = (sl_f - entry_f) * qty_f * direction
                 rr = abs(profit_tp / loss_sl) if loss_sl != 0 else 0
-                logger.info(f"[TRADE {trade_id}] 📌 OCO placed for {symbol}: TP={tp_price_str} ({oco_side}), SL={sl_price_str} ({oco_side}), qty={qty_str}")
+                logger.info(f"[TRADE {trade_id}] 📌 OCO placed for {symbol}: TP={tp_price_str} ({oco_side}), SL={sl_price_str} ({oco_side}), qty={qty_str:.5f}")
                 logger.info(f"[TRADE {trade_id}] 🟢 TP PnL ≈ {profit_tp:.2f} USDC | 🔴 SL PnL ≈ {loss_sl:.2f} USDC | ⚖️ R:R {rr:.2f}")
                 return True
 
@@ -1209,10 +1230,6 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
 # --- SNAPSHOT PLACEHOLDERS
 SNAPSHOT_HISTORY = []
 SNAPSHOT_LOCK = Lock()
-
-# --- SNAPSHOT VARIABLES ---
-SNAPSHOT_INTERVAL = int(os.getenv("SNAPSHOT_INTERVAL", "1"))
-MAX_SNAPSHOTS = int(os.getenv("MAX_SNAPSHOTS", "500"))
 
 # --- SNAPSHOT THREADING ---
 def start_snapshot_workers():
@@ -1428,20 +1445,6 @@ def sanitize_payload(payload: dict) -> dict:
 # ====== ADMIN FUNCTIONS ======
 """Administrative operations: clear positions, borrow/repay USDC, toggle trading parameters, and restore defaults."""
 
-def set_dry_run(state):
-    global DRY_RUN
-
-    if state == "on":
-        DRY_RUN = True
-        logger.admin("🧪 ADMIN ACTION: DRY RUN enabled — cleanup only, no orders")
-    elif state == "off":
-        DRY_RUN = False
-        logger.admin("✅ ADMIN ACTION: DRY RUN disabled — full trading restored")
-    else:
-        return {"status": "error", "msg": "invalid state"}
-
-    return {"status": "ok", "dry_run": DRY_RUN}
-
 # --- ADMIN CLEAR ---
 def clear(symbol=None):
     if symbol:
@@ -1451,7 +1454,7 @@ def clear(symbol=None):
         logger.admin("🔁 ADMIN ACTION: Converting ALL assets to USDC...")
         cancel_all()
 
-    time.sleep(1)
+    time.sleep(2)
     account = get_margin_account()
     cleared_symbols = []
     failed_symbols = []
@@ -1482,7 +1485,8 @@ def clear(symbol=None):
 
         try:
             logger.info(f"➡ Clearing {asset_name} (free={free_qty}, locked={locked_qty}, borrowed={borrowed_qty})")
-            handle_pre_trade_cleanup(asset_symbol)
+            refund(asset_symbol)
+            residual(asset_symbol)
             cleared_symbols.append(asset_symbol)
 
         except Exception as e:
@@ -1834,13 +1838,7 @@ def process_trade(data):
                 return
 
             # 🧹 PRE-TRADE CLEANUP
-            cancel(symbol)
             handle_pre_trade_cleanup(symbol)
-
-            if DRY_RUN:
-                logger.admin("🧪 DRY RUN active — cleanup done, skipping order execution")
-                logger.info(f"[DRY RUN] 🔓 TRADE LOCK RELEASED")
-                return
 
             # 💹 MARKET BUY / SELL AND OCO
             if side == "BUY":
@@ -1860,15 +1858,6 @@ def process_trade(data):
     except Exception as e:
         logger.error(f"🔥 CRITICAL TRADE ERROR: {e}", exc_info=True)
 
-
-@app.route("/dry_run", methods=["GET"])
-def admin_dry_run():
-    if not is_admin_authenticated():
-        return handle_unauthorized()
-
-    state = request.args.get("state", "").lower()
-    result = set_dry_run(state)
-    return jsonify(result), 200
 
 @app.route("/clear", methods=["GET"])
 def admin_clear():
@@ -2048,32 +2037,29 @@ def index():
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
         <style>
             *{box-sizing:border-box;margin:0;padding:0}
-            body{background:#0f172a;color:#e2e8f0;font-family:'Inter',sans-serif;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px 20px;transition:background 0.2s,color 0.2s}
+            body{background:#0f172a;color:#e2e8f0;font-family:'Inter',sans-serif;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px 20px;transition:background 0.2s,color 0.2s;overflow-x:hidden}
             body.light{background:#f8fafc;color:#0f172a}
-
             .topbar{position:fixed;top:20px;right:20px}
-            .theme-toggle{background:none;border:0.5px solid #334155;border-radius:20px;padding:4px 10px;cursor:pointer;font-size:13px;color:#94a3b8;transition:0.15s;display:flex;align-items:center;gap:6px}
+            .theme-toggle{background:none;border:0.5px solid #334155;border-radius:20px;padding:4px 10px;cursor:pointer;font-size:13px;color:#94a3b8;transition:0.15s}
             body.light .theme-toggle{border-color:#cbd5e1;color:#64748b}
             .theme-toggle:hover{background:#1e293b}
             body.light .theme-toggle:hover{background:#e2e8f0}
-
-            .logo{width:180px;margin-bottom:32px;opacity:0.95}
-            .tagline{font-size:12px;letter-spacing:0.12em;color:#475569;text-transform:uppercase;margin-bottom:48px;font-family:'Courier New',monospace}
-
-            .cards{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;width:100%;max-width:540px;margin-bottom:40px}
-            .card{background:#1e293b;border:0.5px solid #334155;border-radius:8px;padding:16px;text-align:center}
+            .adam-row{display:flex;align-items:center;justify-content:center;width:100%;max-width:1200px;gap:0}
+            .adam-pre{font-family:'Courier New',monospace;font-size:11px;line-height:1.35;color:#334155;white-space:pre;flex-shrink:0;transition:color 0.2s}
+            body.light .adam-pre{color:#cbd5e1}
+            .adam-center{display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;min-width:200px;padding:0 16px}
+            .logo{width:140px;margin-bottom:20px;opacity:0.95}
+            .tagline{font-size:10px;letter-spacing:0.12em;color:#475569;text-transform:uppercase;margin-bottom:24px;font-family:'Courier New',monospace;text-align:center}
+            .cards{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;width:100%;margin-bottom:24px}
+            .card{background:#1e293b;border:0.5px solid #334155;border-radius:8px;padding:12px;text-align:center}
             body.light .card{background:#ffffff;border-color:#e2e8f0}
-
             .card-val{font-size:11px;font-family:'Courier New',monospace;color:#94a3b8;margin-bottom:4px}
             body.light .card-val{color:#475569}
-
-            .card-label{font-size:10px;letter-spacing:0.06em;color:#475569;text-transform:uppercase}
-
-            .btn-login{padding:10px 32px;font-size:12px;letter-spacing:0.06em;border:0.5px solid #334155;border-radius:6px;background:transparent;color:#94a3b8;cursor:pointer;text-decoration:none;transition:0.15s;font-family:'Inter',sans-serif;text-transform:uppercase}
+            .card-label{font-size:9px;letter-spacing:0.06em;color:#475569;text-transform:uppercase}
+            .btn-login{padding:8px 28px;font-size:11px;letter-spacing:0.06em;border:0.5px solid #334155;border-radius:6px;background:transparent;color:#94a3b8;cursor:pointer;text-decoration:none;transition:0.15s;font-family:'Inter',sans-serif;text-transform:uppercase}
             body.light .btn-login{border-color:#cbd5e1;color:#64748b}
             .btn-login:hover{background:#1e293b;color:#f1f5f9;border-color:#64748b}
             body.light .btn-login:hover{background:#e2e8f0;color:#0f172a}
-
             .footer{position:fixed;bottom:20px;font-size:10px;color:#1e293b;letter-spacing:0.08em;font-family:'Courier New',monospace}
             body.light .footer{color:#94a3b8}
         </style>
@@ -2084,25 +2070,61 @@ def index():
             <button class="theme-toggle" onclick="toggleTheme()" id="theme-btn">🌙</button>
         </div>
 
-        <img src="/static/sgntlogo.png" id="logo" class="logo" alt="SGNT">
-        <div class="tagline">Automated margin trading system</div>
+        <div class="adam-row">
+            <pre class="adam-pre" id="hand-left">
+                     ++++++*****              
+               ===-===----==+++=+******       
+           ==--::-=+*###**=--===-====++**     
+==-------------==+**#####%#=----==++=---=*#%%
+=====---------==+*###%%%%%%*+=----+###*+++==+*
++++==========+**####%%%%    *+*+--=*%%%%%%%##=
+++++====+**#######%%%%          #*===#%%%%%%%%
+====+++**########%%%                *++## %%%%%
+===+++**####%%%%%                   ###+=%%%%%@
++***####%%%%%                              %###
+######%%%%                                     
+%%%%%%%                                        
+                                               
+                                               
+                                               </pre>
 
-        <div class="cards">
-            <div class="card">
-                <div class="card-val" id="status">—</div>
-                <div class="card-label">Status</div>
+            <div class="adam-center">
+                <img src="/static/sgntlogo.png" id="logo" class="logo" alt="SGNT">
+                <div class="tagline">Automated margin trading system</div>
+                <div class="cards">
+                    <div class="card">
+                        <div class="card-val" id="status">—</div>
+                        <div class="card-label">Status</div>
+                    </div>
+                    <div class="card">
+                        <div class="card-val" id="mode">—</div>
+                        <div class="card-label">Mode</div>
+                    </div>
+                    <div class="card">
+                        <div class="card-val" id="uptime">—</div>
+                        <div class="card-label">Uptime</div>
+                    </div>
+                </div>
+                <a href="/login" class="btn-login">Access</a>
             </div>
-            <div class="card">
-                <div class="card-val" id="mode">—</div>
-                <div class="card-label">Mode</div>
-            </div>
-            <div class="card">
-                <div class="card-val" id="uptime">—</div>
-                <div class="card-label">Uptime</div>
-            </div>
+
+            <pre class="adam-pre" id="hand-right">
+                                          
+                                     +====
+                                -----==+  
+                        ====+*          
+              ==-===------=--------====+* 
+     ==--=---=---=+===++===-----====+++++
+#+====*==+=--===+=-===+***+*#***+=======--------=+
+%%%%%%%%%*+++#=-==-=+#%%##********+++==========+*
+               ##+--+*#*+*#%%%%##%%####**#####*******##
+            *+===+*#**%###%%@%@  %%%%%####%%%%%%%%#%%%%
+            #+*#*+#*+***%%@@            @@@%%%%%%%@@@@
+            ++##*%*+#%%@               
+            *+%*#%**%@                 
+            **%*# ==+                  
+                                       </pre>
         </div>
-
-        <a href="/login" class="btn-login">Access</a>
 
         <div class="footer">SGNT · Autonomous trading infrastructure</div>
 
@@ -2111,9 +2133,7 @@ def index():
                 const light = document.body.classList.toggle('light');
                 document.getElementById('theme-btn').textContent = light ? '☀️' : '🌙';
                 localStorage.setItem('sgnt-theme', light ? 'light' : 'dark');
-                const logo = document.getElementById('logo');
-                logo.src = light ? '/static/sgntlogo0.png' : '/static/sgntlogo.png';
-
+                document.getElementById('logo').src = light ? '/static/sgntlogo0.png' : '/static/sgntlogo.png';
             }
 
             if (localStorage.getItem('sgnt-theme') === 'light') {
@@ -3174,11 +3194,30 @@ def metrics():
         }}
     }};
 
+    const marginData = data.map((d, i) => {
+        const v = d.marginLevel;
+        if (i > 0) {
+            const prev = data[i-1].marginLevel;
+            if (Math.abs(v - prev) > 100) return null;
+        }
+        return transform(v);
+    }});
+
     new Chart(document.getElementById('marginChart'), {{
         type: 'line',
         data: {{
             labels,
-            datasets: [dataset("Margin Level", "marginLevel", "#a78bfa")]
+            datasets: [{{
+                label: "Margin Level",
+                data: marginData,
+                borderColor: "#a78bfa",
+                backgroundColor: "#a78bfa18",
+                tension: 0.3,
+                pointRadius: 2,
+                pointHoverRadius: 4,
+                fill: false,
+                spanGaps: false
+            }}]
         }},
         options: {{
             ...commonOptions,
