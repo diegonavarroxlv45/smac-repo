@@ -95,7 +95,6 @@ DAILY_SHORTS = 0                                             # NUMBER
 TOTAL_LONGS = 0                                              # NUMBER
 TOTAL_SHORTS = 0                                             # NUMBER
 CURRENT_DAY = datetime.utcnow().date()                       # NUMBER
-LAST_TRADE = None                                            # NUMBER
 
 # --- MARGIN LEVEL THRESHOLDS ---
 ML_WARNING = float(os.getenv("ML_WARNING", "2"))             # NUMBER
@@ -1028,22 +1027,7 @@ def handle_post_trade(symbol, side, resp, lot, webhook_data, trade_id):
             trade_id=trade_id
             )
 
-    if executed_qty > 0:
-        update_last_trade(symbol, side)
-
     return executed_qty, entry_price
-
-# --- LAST TRADE SHOWING ---
-def update_last_trade(symbol: str, side: str):
-    global LAST_TRADE
-
-    # ⌚ LAST TRADE PAYLOAD
-    LAST_TRADE = {
-        "symbol": symbol,
-        "side": side,
-        "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-    }
-
 
 # ====== SL/TP FUNCTIONS ======
 """Places OCO, stop-loss-only, or take-profit-only orders after trade execution, with tick-aligned prices and commission-adjusted quantities."""
