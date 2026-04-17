@@ -68,7 +68,7 @@ LOGIN_LIMIT = int(os.getenv("LOGIN_LIMIT", "5"))             # NUMBER
 LOGIN_RETRY = int(os.getenv("LOGIN_RETRY", "5"))             # MINUTES
 SESSION_TIME = int(os.getenv("SESSION_TIME", "5"))           # MINUTES
 
-# --- VARIABLE LIMITS ---
+# --- VARIABLE MINS ---
 MIN_SL_PCT = 0.1                                             # %
 MIN_TP_PCT = 0.1                                             # %
 MIN_RETRIES = 1                                              # NUMBER
@@ -76,6 +76,8 @@ MIN_LOG_VIEW = 0                                             # NUMBER
 MIN_LOGIN_LIMIT = 1                                          # NUMBER
 MIN_LOGIN_RETRY = 1                                          # MINUTES
 MIN_SESSION_TIME = 1                                         # MINUTES
+
+# --- VARIABLE MAXS ---
 MAX_SL_PCT = 50                                              # %
 MAX_TP_PCT = 50                                              # %
 MAX_RETRIES = 5                                              # NUMBER
@@ -99,7 +101,7 @@ CURRENT_DAY = datetime.utcnow().date()                       # NUMBER
 # --- MARGIN LEVEL THRESHOLDS ---
 ML_WARNING = float(os.getenv("ML_WARNING", "2"))             # NUMBER
 ML_DANGER = float(os.getenv("ML_DANGER", "1.25"))            # NUMBER
-ML_CRITICAL = float(os.getenv("ML_CRITICAL", 1.16"))         # NUMBER
+ML_CRITICAL = float(os.getenv("ML_CRITICAL", "1.16"))        # NUMBER
 ML_LIQUIDATION = float(os.getenv("ML_LIQUIDATION", "1.1"))   # NUMBER
 
 # --- RISK_PCT VARIABLES ---
@@ -568,7 +570,6 @@ def check_margin_level():
 """Resolves the effective risk percentage for a trade, applying webhook overrides and margin-based caps."""
 
 def resolve_risk_pct(webhook_data=None):
-
     # 💯 USING DEFAULT RISK_PCT
     risk_pct = DFT_RISK_PCT
 
@@ -595,9 +596,9 @@ def handle_pre_trade_cleanup(symbol: str):
     try:
         cancel(symbol)
         refund(symbol)
-        residual(symbol
+        residual(symbol)
 
-    except Exception as e
+    except Exception as e:
         logger.error(f"⚠️ Couldn't handle pre-trade cleanup for {symbol}: {e}")
 
 # --- CANCEL ORDERS FROM PREVIOUS POSITIONS ---
@@ -1215,11 +1216,6 @@ def place_sl_tp_margin(symbol: str, side: str, entry_price: float, executed_qty:
 SNAPSHOT_HISTORY = []
 SNAPSHOT_LOCK = Lock()
 
-# --- SNAPSHOT THREADING ---
-def start_snapshot_workers():
-    Thread(target=snapshot_worker, daemon=True).start()
-    logger.info("🚀 Snapshot worker started")
-
 # --- SNAPSHOT MEMORY STORAGE ---
 def store_snapshot(snapshot):
     global SNAPSHOT_HISTORY
@@ -1251,16 +1247,6 @@ def store_snapshot(snapshot):
         if len(SNAPSHOT_HISTORY) > MAX_SNAPSHOTS:
             SNAPSHOT_HISTORY.pop(0)
 
-# --- GETTING BTCUSDC PRICE FOR SNAPSHOT
-def get_btc_usdc_price():
-    try:
-        r = _request_with_retries("GET", f"{BASE_URL}/api/v3/ticker/price", params={"symbol": "BTCUSDC"})
-        return float(r["price"])
-
-    except Exception as e:
-        logger.error(f"⚠️ BTC price fetch failed: {e}")
-        raise
-
 # --- SNAPSHOT FORMATION ---
 def build_snapshot():
     acc = get_margin_account()
@@ -1284,9 +1270,14 @@ def build_snapshot():
             usdc_balance = free + locked
             usdc_borrowed = borrowed
 
-    btc_usdc_price = get_btc_usdc_price()
+    try:
+        r = _request_with_retries("GET", f"{BASE_URL}/api/v3/ticker/price", params={"symbol": "BTCUSDC"})
+        btc_usdc_price = float(r["price"])
+
+    except Exception as e:
+        logger.error(f"⚠️ BTC price fetch failed: {e}")
+
     total_balance_usdc = float(acc["totalNetAssetOfBtc"]) * btc_usdc_price
-    margin_level = float(acc["marginLevel"])
 
     # 🏷 ACCOUNT SNAPSHOT
     snapshot = {
@@ -1301,7 +1292,7 @@ def build_snapshot():
         "assetsWithBalance": assets_with_balance,
 
         # ⚖ RISK
-        "marginLevel": margin_level,
+        "marginLevel": float(acc["marginLevel"]),
 
         # 📈 ACTIVITY
         "longsToday": DAILY_LONGS,
@@ -1309,26 +1300,26 @@ def build_snapshot():
         "totalLongs": TOTAL_LONGS,
         "totalShorts": TOTAL_SHORTS,
         "tradeId": TRADE_COUNTER,
-    }
 
-    # 🐍 VARIABLES SNAPSHOT
-    snapshot["variables"] = {
-        # 🎚 BOOL VARS
-        "trading": TRADING,
-        "testnet": TESTNET,
-        "sl_override": SL_OVERRIDE,
-        "tp_override": TP_OVERRIDE,
+        # 🐍 VARIABLES SNAPSHOT
+        "variables": {
+            # 🎚 BOOL VARS
+            "trading": TRADING,
+            "testnet": TESTNET,
+            "sl_override": SL_OVERRIDE,
+            "tp_override": TP_OVERRIDE,
 
-        # 🔢 ENV VARS
-        "sl_pct": SL_PCT,
-        "tp_pct": TP_PCT,
-        "retries": RETRIES,
-        "snapshot_interval": SNAPSHOT_INTERVAL,
-        "max_snapshots": MAX_SNAPSHOTS,
-        "log_view": LOG_VIEW,
-        "login_limit": LOGIN_LIMIT,
-        "login_retry": LOGIN_RETRY,
-        "session_time": SESSION_TIME,
+            # 🔢 ENV VARS
+            "sl_pct": SL_PCT,
+            "tp_pct": TP_PCT,
+            "retries": RETRIES,
+            "snapshot_interval": SNAPSHOT_INTERVAL,
+            "max_snapshots": MAX_SNAPSHOTS,
+            "log_view": LOG_VIEW,
+            "login_limit": LOGIN_LIMIT,
+            "login_retry": LOGIN_RETRY,
+            "session_time": SESSION_TIME,
+        }
     }
 
     return snapshot
@@ -1349,7 +1340,8 @@ def snapshot_worker():
 
 # --- SNAPSHOT EXECUTION ---
 try:
-    start_snapshot_workers()
+    Thread(target=snapshot_worker, daemon=True).start()
+    logger.info("🚀 Snapshot worker started")
 
 except Exception as e:
     logger.error(f"❌ Error starting snapshot workers: {e}")
@@ -1385,10 +1377,10 @@ logger.info(f"________________________________________")
 
 
 # ====== MILESTONES ======
-"""Detects and logs balance milestones (500, 1000, 2000... USDC) as they are reached for the first time."""
+"""Detects and logs balance milestones (1000, 2000, 5000... USDC) as they are reached for the first time."""
 
 # --- MILESTONES SETTINGS ---
-MILESTONES_USDC = [500, 1000, 2000, 5000, 10000, 25000, 50000]
+MILESTONES_USDC = [1000, 2000, 5000, 10000, 20000, 50000]
 REACHED_MILESTONES = set()
 
 # --- CHECK MILESTONES ---
@@ -1401,12 +1393,10 @@ def check_milestones(total_balance_usdc: float):
             new_milestones.append(milestone)
 
             # 🎉 MILESTONES LOGGER
-            logger.info(
-                f"🎉🎉 CONGRATS! 🎉🎉\n"
-                f"💰 You reached {milestone:,.0f} USDC\n"
-                f"🚀 Keep it up. Compounding is working\n" 
-                f"🔥 Discipline > Luck\n"
-            )
+            logger.info(f"🎉🎉 CONGRATS! 🎉🎉\n")
+            logger.info(f"💰 You reached {milestone:,.0f} USDC\n")
+            logger.info(f"🚀 Keep it up. Compounding is working\n") 
+            logger.info(f"🔥 Discipline > Luck\n")
 
     return new_milestones
 
@@ -1542,76 +1532,6 @@ def repay(amount):
     logger.admin(f"✅ REPAY completed: {amount} USDC")
     return resp
 
-# --- ADMIN TRADING ---
-def set_trading_state(state):
-    global TRADING
-
-    if state == "on":
-        TRADING = True
-        logger.admin("▶️ ADMIN ACTION: Trading RESUMED")
-    elif state == "off":
-        TRADING = False
-        logger.admin("⏸️ ADMIN ACTION: Trading PAUSED")
-    else:
-        return {"status": "error", "msg": "invalid state"}
-
-    return {"status": "ok", "trading": TRADING}
-
-# --- ADMIN TESTNET ---
-def set_testnet_state(state):
-    global TESTNET
-
-    if state == "on":
-        TESTNET = True
-        logger.admin("🧪 ADMIN ACTION: TESTNET MODE ENABLED")
-    elif state == "off":
-        TESTNET = False
-        logger.admin("🌐 ADMIN ACTION: LIVE MODE ENABLED")
-    else:
-        return {"status": "error", "msg": "invalid state"}
-
-    return {"status": "ok", "testnet": TESTNET}
-
-# --- ADMIN SET SL ---
-def set_sl(state=None, value=None):
-    global SL_OVERRIDE, SL_PCT
-
-    if state is not None:
-        if state == "on":
-            SL_OVERRIDE = True
-            logger.admin("🟢 ADMIN ACTION: SL override ENABLED")
-        elif state == "off":
-            SL_OVERRIDE = False
-            logger.admin("🔴 ADMIN ACTION: SL override DISABLED")
-        else:
-            return {"status": "error", "msg": "invalid state"}
-        return {"status": "ok", "sl_override": SL_OVERRIDE}
-
-    if value is not None:
-        return set_var("sl_pct", value)
-
-    return {"status": "error", "msg": "no state or value provided"}
-
-# --- ADMIN SET TP ---
-def set_tp(state=None, value=None):
-    global TP_OVERRIDE, TP_PCT
-
-    if state is not None:
-        if state == "on":
-            TP_OVERRIDE = True
-            logger.admin("🟢 ADMIN ACTION: TP override ENABLED")
-        elif state == "off":
-            TP_OVERRIDE = False
-            logger.admin("🔴 ADMIN ACTION: TP override DISABLED")
-        else:
-            return {"status": "error", "msg": "invalid state"}
-        return {"status": "ok", "tp_override": TP_OVERRIDE}
-
-    if value is not None:
-        return set_var("tp_pct", value)
-
-    return {"status": "error", "msg": "no state or value provided"}
-
 # --- ADMIN SET VAR ---
 def set_var(var_name, value):
     if var_name not in SETTABLE_VARS:
@@ -1619,16 +1539,29 @@ def set_var(var_name, value):
 
     meta = SETTABLE_VARS[var_name]
 
-    try:
-        value = meta["type"](value)
+    # 🎚 BOOL HANDLING
+    if meta["type"] == "bool":
+        if str(value).lower() in ("on", "true", "1"):
+            parsed = True
+        elif str(value).lower() in ("off", "false", "0"):
+            parsed = False
+        else:
+            return {"status": "error", "msg": f"invalid bool value for {var_name}"}
 
+        globals()[meta["var"]] = parsed
+        logger.admin(f"🛠️ ADMIN ACTION: {meta['var']} → {parsed}")
+        return {"status": "ok", var_name: parsed}
+
+    # 🔢 NUMERIC HANDLING
+    try:
+        parsed = meta["type"](value)
     except Exception:
         return {"status": "error", "msg": f"invalid value for {var_name}"}
 
-    value = max(meta["min"], min(value, meta["max"]))
-    globals()[meta["var"]] = value
-    logger.admin(f"🛠️ ADMIN ACTION: {meta['var']} updated → {value}")
-    return {"status": "ok", var_name: value}
+    parsed = max(meta["min"], min(parsed, meta["max"]))
+    globals()[meta["var"]] = parsed
+    logger.admin(f"🛠️ ADMIN ACTION: {meta['var']} → {parsed}")
+    return {"status": "ok", var_name: parsed}
 
 # --- ADMIN RESTORE ---
 def restore():
@@ -1680,16 +1613,16 @@ ADMIN_ACTIONS = {
     "CLEAR": clear,
     "BORROW": borrow,
     "REPAY": repay,
-    "TRADING": set_trading_state,
-    "TESTNET": set_testnet_state,
-    "SL": set_sl,
-    "TP": set_tp,
     "SET": set_var,
     "RESTORE": restore,
 }
 
 # --- SETTABLE VARS ---
 SETTABLE_VARS = {
+    "trading":      {"type": "bool", "var": "TRADING"},
+    "testnet":      {"type": "bool", "var": "TESTNET"},
+    "sl_override":  {"type": "bool", "var": "SL_OVERRIDE"},
+    "tp_override":  {"type": "bool", "var": "TP_OVERRIDE"},
     "sl_pct":       {"type": float, "min": MIN_SL_PCT,       "max": MAX_SL_PCT,       "var": "SL_PCT"},
     "tp_pct":       {"type": float, "min": MIN_TP_PCT,       "max": MAX_TP_PCT,       "var": "TP_PCT"},
     "retries":      {"type": int,   "min": MIN_RETRIES,      "max": MAX_RETRIES,      "var": "RETRIES"},
@@ -1718,6 +1651,9 @@ def get_ip():
 def create_admin_session(ip):
     ADMIN_SESSIONS[ip] = time.time()
     logger.admin(f"🔓 Admin session opened for {ip}")
+
+    if ip in LOGIN_ATTEMPTS:
+        del LOGIN_ATTEMPTS[ip]
 
 # --- ADMIN SESSION CLOSING ---
 def destroy_admin_session(ip):
@@ -1760,11 +1696,6 @@ def is_rate_limited(ip):
 
     return len(attempts) > LOGIN_LIMIT
 
-# --- CLEARING LOGIN ATTEMPTS ---
-def reset_login_attempts(ip):
-    if ip in LOGIN_ATTEMPTS:
-        del LOGIN_ATTEMPTS[ip]
-
 
 # ====== FLASK WEBHOOK ======
 """Webhook endpoint that receives trading signals, validates them, and dispatches trade execution in a background thread."""
@@ -1783,8 +1714,11 @@ def webhook():
     if not data:
         return jsonify({"error": "Empty payload"}), 400
 
+    # 📩 JSON RECEIVING
     logger.info(f"📩 JSON received: {sanitize_payload(data)}")
     time.sleep(5)
+
+    # 🩺 HEALTH CHECK
     allowed, response = trading_guard()
 
     if not allowed:
@@ -1900,48 +1834,6 @@ def admin_repay():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-
-@app.route("/trading", methods=["GET"])
-def admin_trading():
-    if not is_admin_authenticated():
-        return handle_unauthorized()
-
-    state = request.args.get("state", "").lower()
-    result = set_trading_state(state)
-    return jsonify(result), 200
-
-
-@app.route("/testnet", methods=["GET"])
-def admin_testnet():
-    if not is_admin_authenticated():
-        return handle_unauthorized()
-
-    state = request.args.get("state", "").lower()
-    result = set_testnet_state(state)
-    return jsonify(result), 200
-
-
-@app.route("/sl", methods=["GET"])
-def admin_sl():
-    if not is_admin_authenticated():
-        return handle_unauthorized()
-
-    state = request.args.get("state")
-    value = request.args.get("value")
-    result = set_sl(state=state, value=value)
-    return jsonify(result), 200
-
-
-@app.route("/tp", methods=["GET"])
-def admin_tp():
-    if not is_admin_authenticated():
-        return handle_unauthorized()
-
-    state = request.args.get("state")
-    value = request.args.get("value")
-    result = set_tp(state=state, value=value)
-    return jsonify(result), 200
 
 
 @app.route("/set", methods=["GET"])
@@ -2094,15 +1986,14 @@ def index():
 
             <pre class="adam-pre" id="hand-right">
                                           
-                                     +====
-                                -----==+  
-                        ====+*          
-              ==-===------=--------====+* 
-     ==--=---=---=+===++===-----====+++++
-#+====*==+=--===+=-===+***+*#***+=======--------=+
-%%%%%%%%%*+++#=-==-=+#%%##********+++==========+*
-               ##+--+*#*+*#%%%%##%%####**#####*******##
-            *+===+*#**%###%%@%@  %%%%%####%%%%%%%%#%%%%
+                                                 +====
+                                         +====-----==+  
+                           ==-===------=--------====+* 
+                  ==--=---=---=+===++===-----====+++++
+    #+====*==+=--===+=-===+***+*#***+=======--------=+
+     %%%%%%%%%*+++#=-==-=+#%%##********+++==========+*
+              ##+--+*#*+*#%%%%##%%####**#####*******##
+           *+===+*#**%###%%@%@  %%%%%####%%%%%%%%#%%%%
             #+*#*+#*+***%%@@            @@@%%%%%%%@@@@
             ++##*%*+#%%@               
             *+%*#%**%@                 
@@ -2182,7 +2073,6 @@ def login():
 
             if admin_key == ADMIN_KEY:
                 create_admin_session(ip)
-                reset_login_attempts(ip)
 
                 if request.is_json:
                     return jsonify({"status": "logged in"}), 200
@@ -2444,10 +2334,10 @@ def dashboard():
 
         <div class="card">
             <div class="card-title">Control</div>
-            <div class="toggle-row"><span class="toggle-label">Trading</span><label class="toggle"><input type="checkbox" id="tog-trading" onchange="callToggle('trading',this.checked)"><span class="slider"></span></label></div>
-            <div class="toggle-row"><span class="toggle-label">Testnet</span><label class="toggle"><input type="checkbox" id="tog-testnet" onchange="callToggle('testnet',this.checked)"><span class="slider"></span></label></div>
-            <div class="toggle-row"><span class="toggle-label">SL Override</span><label class="toggle"><input type="checkbox" id="tog-sl" onchange="callToggle('sl',this.checked)"><span class="slider"></span></label></div>
-            <div class="toggle-row"><span class="toggle-label">TP Override</span><label class="toggle"><input type="checkbox" id="tog-tp" onchange="callToggle('tp',this.checked)"><span class="slider"></span></label></div>
+            <div class="toggle-row"><span class="toggle-label">Trading</span><label class="toggle"><input type="checkbox" id="tog-trading" onchange="setVar('trading',this.checked)"><span class="slider"></span></label></div>
+            <div class="toggle-row"><span class="toggle-label">Testnet</span><label class="toggle"><input type="checkbox" id="tog-testnet" onchange="setVar('testnet',this.checked)"><span class="slider"></span></label></div>
+            <div class="toggle-row"><span class="toggle-label">SL Override</span><label class="toggle"><input type="checkbox" id="tog-sl" onchange="setVar('sl_override',this.checked)"><span class="slider"></span></label></div>
+            <div class="toggle-row"><span class="toggle-label">TP Override</span><label class="toggle"><input type="checkbox" id="tog-tp" onchange="setVar('tp_override',this.checked)"><span class="slider"></span></label></div>
         </div>
 
         <div class="card">
@@ -2457,14 +2347,14 @@ def dashboard():
                 <input type="number" id="sl-input" placeholder="{{ MIN_SL_PCT }}–{{ MAX_SL_PCT }}" step="0.1" min="{{ MIN_SL_PCT }}" max="{{ MAX_SL_PCT }}">
                 <button class="btn-minmax" onclick="setInputVal('sl-input',{{ MIN_SL_PCT }})">min</button>
                 <button class="btn-minmax" onclick="setInputVal('sl-input',{{ MAX_SL_PCT }})">max</button>
-                <button class="btn" onclick="setParam('sl','value',document.getElementById('sl-input').value)">Set</button>
+                <button class="btn" onclick="setVar('sl_pct', document.getElementById('sl-input').value)">Set</button>
             </div>
             <div style="font-size:11px;color:#64748b;margin:8px 0 4px">TP % <span id="tp-val" style="color:#f1f5f9">—</span></div>
             <div class="input-row">
                 <input type="number" id="tp-input" placeholder="{{ MIN_TP_PCT }}–{{ MAX_TP_PCT }}" step="0.1" min="{{ MIN_TP_PCT }}" max="{{ MAX_TP_PCT }}">
                 <button class="btn-minmax" onclick="setInputVal('tp-input',{{ MIN_TP_PCT }})">min</button>
                 <button class="btn-minmax" onclick="setInputVal('tp-input',{{ MAX_TP_PCT }})">max</button>
-                <button class="btn" onclick="setParam('tp','value',document.getElementById('tp-input').value)">Set</button>
+                <button class="btn" onclick="setVar('tp_pct', document.getElementById('tp-input').value)">Set</button>
             </div>
             <div style="font-size:11px;color:#64748b;margin:8px 0 4px">Retries <span id="retries-val" style="color:#f1f5f9">—</span></div>
             <div class="input-row">
@@ -2653,26 +2543,25 @@ def dashboard():
             }
         }
 
-        async function callToggle(param, checked) {
-            const state = checked ? 'on' : 'off';
-            const d = await api(`/${param}?state=${state}`);
-            if (d) toast(`${param} → ${state}`);
-            await loadData();
-        }
-
-        async function setParam(param, key, val) {
-            if (!val) { toast('Insert value', false); return; }
-            const d = await api(`/${param}?${key}=${val}`);
-            if (d && d.status === 'ok') toast(`${param} updated`);
-            else toast('Error', false);
-            await loadData();
-        }
-
         async function setVar(varName, val) {
-            if (!val && val !== 0) { toast('Insert value', false); return; }
-            const d = await api(`/set?var=${varName}&value=${val}`);
-            if (d && d.status === 'ok') toast(`${varName} updated`);
-            else toast('Error', false);
+            if (val === undefined || val === null || val === '') {
+                toast('Insert value', false);
+                return;
+            }
+
+            let parsedVal = val;
+            if (typeof val === 'boolean') {
+                parsedVal = val ? 'true' : 'false';
+            }
+
+            const d = await api(`/set?var=${varName}&value=${encodeURIComponent(parsedVal)}`);
+
+            if (d && d.status === 'ok') {
+                toast(`${varName} updated`);
+            } else {
+                toast(d?.msg || 'Error', false);
+            }
+
             await loadData();
         }
 
@@ -3178,12 +3067,12 @@ def metrics():
         }}
     }};
 
-    const marginData = data.map((d, i) => {
+    const marginData = data.map((d, i) => {{
         const v = d.marginLevel;
-        if (i > 0) {
+        if (i > 0) {{
             const prev = data[i-1].marginLevel;
             if (Math.abs(v - prev) > 100) return null;
-        }
+        }}
         return transform(v);
     }});
 
