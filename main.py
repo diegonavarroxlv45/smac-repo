@@ -21,8 +21,8 @@ import requests
 import functools
 import threading
 from collections import deque
-from datetime import datetime
 from threading import Lock, Thread
+from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from concurrent.futures import ThreadPoolExecutor
 from logging.handlers import TimedRotatingFileHandler
@@ -42,46 +42,44 @@ executor = ThreadPoolExecutor(max_workers=3)
 
 # --- DEFAULT VARIABLES ---
 DFT_TRADING = True
-DFT_TESTNET = False
 DFT_SL_OVERRIDE = True
 DFT_TP_OVERRIDE = True
 DFT_LOG_DEBUG = False
-DFT_ALGORITHM = "sha256"
+DFT_PLATFORM = "Binance"
 DFT_SL_PCT = 2.0
 DFT_TP_PCT = 4.0
-DFT_LOGIN_LIMIT = 5
-DFT_LOGIN_RETRY = 5
+DFT_LOGIN_LIMIT  = 5
+DFT_LOGIN_RETRY  = 5
 DFT_SESSION_TIME = 5
 
 # --- BOOL VARIABLES ---
 TRADING = os.getenv("TRADING", "true").lower() == "true"
-TESTNET = os.getenv("TESTNET", "false").lower() == "true"
 SL_OVERRIDE = os.getenv("SL_OVERRIDE", "true").lower() == "true"
 TP_OVERRIDE = os.getenv("TP_OVERRIDE", "true").lower() == "true"
 LOG_DEBUG = os.getenv("LOG_DEBUG", "false").lower() == "true"
 
 # --- STRINGS VARIABLES ---
-ALGORITHM = os.getenv("ALGO", "sha256").strip().lower()      # STRING
+PLATFORM  = os.getenv("PLATFORM", "Binance")                 # STRING
 
 # --- ENVIRONMENT VARIABLES ---
 SL_PCT = float(os.getenv("SL_PCT", "2"))                     # %
 TP_PCT = float(os.getenv("TP_PCT", "4"))                     # %
-LOGIN_LIMIT = int(os.getenv("LOGIN_LIMIT", "5"))             # NUMBER
-LOGIN_RETRY = int(os.getenv("LOGIN_RETRY", "5"))             # MINUTES
+LOGIN_LIMIT  = int(os.getenv("LOGIN_LIMIT", "5"))            # NUMBER
+LOGIN_RETRY  = int(os.getenv("LOGIN_RETRY", "5"))            # MINUTES
 SESSION_TIME = int(os.getenv("SESSION_TIME", "5"))           # MINUTES
 
 # --- VARIABLE MINS ---
 MIN_SL_PCT = 0.1                                             # %
 MIN_TP_PCT = 0.1                                             # %
-MIN_LOGIN_LIMIT = 1                                          # NUMBER
-MIN_LOGIN_RETRY = 1                                          # MINUTES
+MIN_LOGIN_LIMIT  = 1                                         # NUMBER
+MIN_LOGIN_RETRY  = 1                                         # MINUTES
 MIN_SESSION_TIME = 1                                         # MINUTES
 
 # --- VARIABLE MAXS ---
 MAX_SL_PCT = 50                                              # %
 MAX_TP_PCT = 50                                              # %
-MAX_LOGIN_LIMIT = 15                                         # NUMBER
-MAX_LOGIN_RETRY = 15                                         # MINUTES
+MAX_LOGIN_LIMIT  = 15                                        # NUMBER
+MAX_LOGIN_RETRY  = 15                                        # MINUTES
 MAX_SESSION_TIME = 15                                        # MINUTES
 
 # --- SDP PERIODS ---
@@ -90,11 +88,11 @@ GRACE_PERIOD = int(os.getenv("GRACE_PERIOD", "2"))           # MINUTES
 
 # --- TRADE COUNTER VARIABLES ---
 TRADE_COUNTER = 0                                            # NUMBER
-DAILY_LONGS = 0                                              # NUMBER
-DAILY_SHORTS = 0                                             # NUMBER
-TOTAL_LONGS = 0                                              # NUMBER
-TOTAL_SHORTS = 0                                             # NUMBER
-CURRENT_DAY = datetime.utcnow().date()                       # NUMBER
+DAILY_LONGS   = 0                                            # NUMBER
+DAILY_SHORTS  = 0                                            # NUMBER
+TOTAL_LONGS   = 0                                            # NUMBER
+TOTAL_SHORTS  = 0                                            # NUMBER
+CURRENT_DAY   = datetime.utcnow().date()                     # NUMBER
 
 # --- MARGIN LEVEL THRESHOLDS ---
 ML_WARNING = float(os.getenv("ML_WARNING", "2"))             # NUMBER
@@ -172,34 +170,53 @@ logging.Logger.date = date
 
 
 # ====== APIS ======
-"""Binance API configuration: selects live or testnet credentials and base URL, validates that secrets are present."""
+"""API configuration: selects credentials and base URL, validates that secrets are present."""
+
+# --- ALLOWED PLATFORMS ---
+VALID_PLATFORMS = {"Binance", "Binance Testnet"}
+
+if PLATFORM not in VALID_PLATFORMS:
+    logger.error(f"❌ Invalid PLATFORM '{PLATFORM}'. Valid options: {VALID_PLATFORMS}")
+    raise RuntimeError(f"Invalid PLATFORM: '{PLATFORM}'")
 
 # --- BINANCE / TESTNET CONFIGURATION ---
-if TESTNET:
-    # 🧪 TESTNET CONFIG
-    logger.info("🧪 Running in TESTNET mode")
-    BINANCE_API_KEY = os.getenv("TESTNET_API_KEY")
-    BINANCE_API_SECRET = os.getenv("TESTNET_API_SECRET")
-    BASE_URL = "https://testnet.binance.vision"
-
-    if not BINANCE_API_KEY or not BINANCE_API_SECRET:
-        logger.error("❌ Missing TESTNET API credentials")
-        raise RuntimeError("Missing TESTNET API credentials")
-    else:
-        logger.info("🔐 Testnet API credentials loaded successfully")
-
-else:
-    # 🌐 BINANCE CONFIG
-    logger.info("🌐 Running in LIVE mode")
-    BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
-    BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
+logger.info(f"🌐 Running in {PLATFORM}")
+if PLATFORM == "Binance":
+    API_KEY = os.getenv("BINANCE_API_KEY")
+    API_SECRET = os.getenv("BINANCE_API_SECRET")
     BASE_URL = "https://api.binance.com"
+    ALGORITHM = "sha256"
 
-    if not BINANCE_API_KEY or not BINANCE_API_SECRET:
-        logger.error("❌ Missing BINANCE API credentials")
-        raise RuntimeError("Missing BINANCE API credentials")
-    else:
-        logger.info("🔐 Binance API credentials loaded successfully")
+elif PLATFORM == "Binance Testnet":
+    logger.info("🧪 Running in Binance Testnet")
+    API_KEY = os.getenv("TESTNET_API_KEY")
+    API_SECRET = os.getenv("TESTNET_API_SECRET")
+    BASE_URL = "https://testnet.binance.vision"
+    ALGORITHM = "sha256"
+
+if not API_KEY:
+    logger.error(f"❌ Missing {PLATFORM} API KEY credentials")
+    raise RuntimeError(f"Missing {PLATFORM} API KEY credentials")
+elif not API_SECRET:
+    logger.error(f"❌ Missing {PLATFORM} API SECRET credentials")
+    raise RuntimeError(f"Missing {PLATFORM} API SECRET credentials")
+elif not API_KEY and not API_SECRET:
+    logger.error(f"❌ Missing both {PLATFORM} API credentials")
+    raise RuntimeError(f"Missing both {PLATFORM} API credentials")
+else:
+    logger.info(f"🔐 {PLATFORM} API credentials loaded successfully")
+
+
+# ====== TIME FUNCTION ======
+"""Returns the current UTC timestamp in milliseconds for API request signing."""
+
+def _now_ms():
+    ts = int(time.time() * 1000)
+
+    if LOG_DEBUG:
+        logger_admin(f"📋 NOW_MS={ts}")
+
+    return ts
 
 
 # ====== SAFE DEPLOYMENT PATTERN ======
@@ -306,17 +323,10 @@ def trading_guard():
                 "status": "booting_or_unhealthy",
                 "trading": TRADING
             }),
-            503
+            200
         )
 
     return True, None
-
-
-# ====== TIME FUNCTION ======
-"""Returns the current UTC timestamp in milliseconds for Binance API request signing."""
-
-def _now_ms():
-    return int(time.time() * 1000)
 
 
 # ====== SIGNING AND REQUESTING ======
@@ -324,8 +334,10 @@ def _now_ms():
 
 # --- ALGORITHM VALIDATION ---
 def check_algorithm(ALGORITHM):
+    if LOG_DEBUG:
+        logger_admin(f"📋 Using algorithm: {ALGORITHM}")
     if ALGORITHM not in hashlib.algorithms_guaranteed:
-        logger.error(f" {ALGORITHM} not valid or unavailable or hashlib module")
+        logger.error(f"⚠ {ALGORITHM} not valid or unavailable or hashlib module")
         raise ValueError(f"error: ALGORITHM '{ALGORITHM}' not valid.")
     else:
         return getattr(hashlib, ALGORITHM)
@@ -349,17 +361,26 @@ BACKOFFS = {
     504: 3,
 }
 
+# --- SESSION REQUEST ---
+SESSION = requests.Session()
+
 # --- REQUESTING ---
 def request_with_retries(method: str, url: str, **kwargs):
     for i in range(3):
         try:
-            resp = requests.request(method, url, timeout=10, **kwargs)
+            resp = SESSION.request(method, url, timeout=10, **kwargs)
             status = resp.status_code
 
             try:
                 data = resp.json()
             except Exception:
                 data = resp.text
+
+            if (isinstance(data, dict) and data.get("code") == -1021):
+                return data
+
+            if LOG_DEBUG:
+                logger_admin(f"📋 REQUEST attempt={i+1}, method={method}, url={url[:150]}")
 
             # ⚠ ERROR CODES
             if status == 400 and isinstance(data, dict) and "code" in data and data["code"] < 0:
@@ -390,6 +411,8 @@ def request_with_retries(method: str, url: str, **kwargs):
 
             # ✅ 200 OK
             if status == 200:
+                if i > 0:
+                    logger.info(f"✅ Request recovered on retry {i+1}")
                 return data
 
             logger.error(f"⚠️ Attempt {i+1} failed: {data}")
@@ -409,20 +432,49 @@ def request_with_retries(method: str, url: str, **kwargs):
 
 # --- SEND REQUESTS ---
 def send_signed_request(http_method: str, path: str, payload: dict):
-    if "timestamp" not in payload:
-        payload["timestamp"] = _now_ms()
+    headers = {"X-MBX-APIKEY": API_KEY}
 
-    algo = check_algorithm(ALGORITHM)
-    query_string = "&".join([f"{k}={v}" for k, v in payload.items()])
-    signature = hmac.new(BINANCE_API_SECRET.encode(), query_string.encode(), algo).hexdigest()
-    url = f"{BASE_URL}{path}?{query_string}&signature={signature}"
-    headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
-    return request_with_retries(http_method, url, headers=headers)
+    for attempt in range(3):
+
+        try:
+            params = payload.copy()
+
+            params["timestamp"] = _now_ms()
+
+            algo = check_algorithm(ALGORITHM)
+
+            query_string = "&".join(
+                [f"{k}={v}" for k, v in params.items()]
+            )
+
+            signature = hmac.new(
+                API_SECRET.encode(),
+                query_string.encode(),
+                algo
+            ).hexdigest()
+
+            url = (
+                f"{BASE_URL}{path}"
+                f"?{query_string}"
+                f"&signature={signature}"
+            )
+
+            if LOG_DEBUG:
+                logger_admin(f"📋 SIGNED attempt={attempt+1}, {http_method} {path}, timestamp={params['timestamp']}")
+
+            return request_with_retries(http_method, url, headers=headers)
+
+        except Exception:
+
+            if attempt == 2:
+                raise
+
+            time.sleep(1)
 
 # --- CHECK ERROR CODES ---
 def check_error(resp, symbol, task):
     if LOG_DEBUG:
-        logger.admin(f"📋 {task} response for {symbol}: {resp}")
+        logger_admin(f"📋 {task} response for {symbol}: {resp}")
 
     if isinstance(resp, dict) and resp.get("code", 0) < 0:
         logger.error(f"⚠️ {task} skipped for {symbol}: {resp}")
@@ -435,9 +487,9 @@ def check_error(resp, symbol, task):
 
 # --- BALANCE FETCHING ---
 def get_balance_margin(asset="USDC") -> float:
-    q, sig = sign_params_query({"timestamp": _now_ms()}, BINANCE_API_SECRET)
+    q, sig = sign_params_query({"timestamp": _now_ms()}, API_SECRET)
     url = f"{BASE_URL}/sapi/v1/margin/account?{q}&signature={sig}"
-    headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
+    headers = {"X-MBX-APIKEY": API_KEY}
     data = request_with_retries("GET", url, headers=headers)
     bal = next((b for b in data.get("userAssets", []) if b["asset"] == asset), None)
     return float(bal["free"]) if bal else 0.0
@@ -486,7 +538,6 @@ def next_trade_id(side):
     # 📊 GENERAL TRADE COUNTER
     with TRADE_LOCK:
         TRADE_COUNTER += 1
-        return TRADE_COUNTER
 
     # 📈 TRADE COUNTER LONG
     if side == "Long":
@@ -498,7 +549,7 @@ def next_trade_id(side):
         DAILY_SHORTS +=1
         TOTAL_SHORTS +=1
 
-    return trade_id
+    return TRADE_COUNTER
 
 # --- DAILY SUMMARY ---
 def check_daily_summary():
@@ -510,13 +561,11 @@ def check_daily_summary():
         total_trades = DAILY_LONGS + DAILY_SHORTS
 
         if total_trades > 0:
-            logger.date(
-                # 📅 DAY SUMMARY LOGGER
-                f"📅 Day {CURRENT_DAY} completed! "
-                f"Trades: {total_trades} "
-                f"(Longs: {DAILY_LONGS} | Shorts: {DAILY_SHORTS})"
-                f"_____________________________________\n"
-            )
+            # 📅 DAY SUMMARY LOGGER
+            logger.date(f"📅 Day {CURRENT_DAY} completed!")
+            logger.date(f"Trades: {total_trades}")
+            logger.date(f"(Longs: {DAILY_LONGS} | Shorts: {DAILY_SHORTS})")
+            logger.date("_____________________________________\n")
 
         DAILY_LONGS = 0
         DAILY_SHORTS = 0
@@ -608,6 +657,9 @@ def check_margin_level():
 
     except Exception as e:
         logger.error(f"⚠️ Could not fetch margin level: {e}")
+        if any(x in str(e) for x in ["Request failed after retries", "ConnectTimeout", "ConnectionError"]):
+            logger.error("⚠️ Network error — blocking trading as precaution")
+            return False
         return True
 
 
@@ -663,9 +715,9 @@ def cancel(symbol: str):
 # --- CANCEL ALL ORDERS FOR CLEAR ---
 def cancel_all():
     try:
-        q, sig = sign_params_query({"timestamp": _now_ms()}, BINANCE_API_SECRET)
+        q, sig = sign_params_query({"timestamp": _now_ms()}, API_SECRET)
         url = f"{BASE_URL}/sapi/v1/margin/openOrders?{q}&signature={sig}"
-        headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
+        headers = {"X-MBX-APIKEY": API_KEY}
         open_orders = request_with_retries("GET", url, headers=headers)
 
         if not open_orders:
@@ -686,10 +738,13 @@ def cleanup(symbol: str):
 
     try:
         lot = get_symbol_lot(symbol)
-        q, sig = sign_params_query({"timestamp": _now_ms()}, BINANCE_API_SECRET)
+        q, sig = sign_params_query({"timestamp": _now_ms()}, API_SECRET)
         url = f"{BASE_URL}/sapi/v1/margin/account?{q}&signature={sig}"
-        headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
+        headers = {"X-MBX-APIKEY": API_KEY}
         acc_data = request_with_retries("GET", url, headers=headers)
+        if not isinstance(acc_data, dict) or "userAssets" not in acc_data:
+            logger.error(f"⚠️ Cleanup aborted for {base_asset}: invalid account response: {acc_data}")
+            return
         asset_data = next((a for a in acc_data["userAssets"] if a["asset"] == base_asset), None)
         usdc_data  = next((a for a in acc_data["userAssets"] if a["asset"] == "USDC"), None)
 
@@ -747,7 +802,7 @@ def cleanup(symbol: str):
                     # --- Refresh after buy ---
                     time.sleep(2)
                     for _ in range(3):
-                        q, sig = sign_params_query({"timestamp": _now_ms()}, BINANCE_API_SECRET)
+                        q, sig = sign_params_query({"timestamp": _now_ms()}, API_SECRET)
                         url = f"{BASE_URL}/sapi/v1/margin/account?{q}&signature={sig}"
                         acc_data = request_with_retries("GET", url, headers=headers)
                         asset_data = next((a for a in acc_data["userAssets"] if a["asset"] == base_asset), None)
@@ -786,7 +841,7 @@ def cleanup(symbol: str):
                 # --- Refresh after repay ---
                 time.sleep(2)
                 for _ in range(3):
-                    q, sig = sign_params_query({"timestamp": _now_ms()}, BINANCE_API_SECRET)
+                    q, sig = sign_params_query({"timestamp": _now_ms()}, API_SECRET)
                     url = f"{BASE_URL}/sapi/v1/margin/account?{q}&signature={sig}"
                     acc_data = request_with_retries("GET", url, headers=headers)
                     asset_data = next((a for a in acc_data["userAssets"] if a["asset"] == base_asset), None)
@@ -850,7 +905,7 @@ def cleanup(symbol: str):
 """Core trade execution: margin long (buy with quote quantity), margin short (borrow and sell), post-trade handling, and SL/TP placement."""
 
 # --- MARGIN LONG ---
-def execute_long_margin(symbol, webhook_data=None):
+def execute_long_margin(symbol, strategy, webhook_data=None):
     lot = get_symbol_lot(symbol)
     balance_usdc = get_balance_margin("USDC")
     risk_pct = resolve_risk_pct(webhook_data)
@@ -872,11 +927,11 @@ def execute_long_margin(symbol, webhook_data=None):
         return err
 
     trade_id = next_trade_id("Long")
-    post_trade(symbol, "Long", resp, lot, webhook_data, trade_id)
+    post_trade(symbol, strategy, "Long", resp, lot, webhook_data, trade_id)
     return {"order": resp, "trade_id": trade_id}
 
 # --- MARGIN SHORT ---
-def execute_short_margin(symbol, webhook_data=None):
+def execute_short_margin(symbol, strategy, webhook_data=None):
     lot = get_symbol_lot(symbol)
     balance_usdc = get_balance_margin("USDC")
 
@@ -897,7 +952,7 @@ def execute_short_margin(symbol, webhook_data=None):
     qty_str = borrowing(raw_qty, lot, price_est, symbol)
 
     if not qty_str:
-        logger.error(f"Couldn't borrow {base_asset}, aborting short")
+        logger.error(f"⚠ Couldn't borrow {base_asset}, aborting short")
         return {"error": "borrow_failed"}
 
     # 📉 MARGIN SHORT PARAMS
@@ -916,7 +971,7 @@ def execute_short_margin(symbol, webhook_data=None):
         return err
 
     trade_id = next_trade_id("Short")
-    post_trade(symbol, "Short", resp, lot, webhook_data, trade_id)
+    post_trade(symbol, strategy, "Short", resp, lot, webhook_data, trade_id)
     return {"order": resp, "trade_id": trade_id}
 
 # --- BORROWING (FOR SHORT) ---
@@ -980,7 +1035,7 @@ def extract_execution_info(resp):
     return executed_qty, entry, spent_qty
 
 # --- POST TRADE ---
-def post_trade(symbol, side, resp, lot, webhook_data, trade_id):
+def post_trade(symbol, strategy, side, resp, lot, webhook_data, trade_id):
     executed_qty, entry, spent_qty = extract_execution_info(resp)
 
     if executed_qty == 0:
@@ -1010,7 +1065,7 @@ def post_trade(symbol, side, resp, lot, webhook_data, trade_id):
             trade_id=trade_id
             )
 
-        update_last_trade(symbol, side, executed_qty, spent_qty)
+        update_last_trade(symbol, side, executed_qty, spent_qty, strategy)
 
     return executed_qty, entry
 
@@ -1021,17 +1076,21 @@ def post_trade(symbol, side, resp, lot, webhook_data, trade_id):
 LAST_TRADE = {}
 
 # --- LAST TARDE FUNCTION ---
-def update_last_trade(symbol: str, side: str, executed_qty: str, spent_qty: str):
+def update_last_trade(symbol: str, side: str, executed_qty: str, spent_qty: str, strategy: str):
     global LAST_TRADE
 
     # ⌚ LAST TRADE PAYLOAD
     LAST_TRADE = {
+        "tradeId": TRADE_COUNTER,
         "symbol": symbol,
         "side": side,
         "executed_qty": executed_qty,
         "spent_qty": spent_qty,
+        "strategy": strategy,
         "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     }
+
+    store_trade(LAST_TRADE.copy())
 
 
 # ====== SL/TP FUNCTIONS ======
@@ -1228,7 +1287,7 @@ def place_sl_tp_margin(symbol: str, side: str, entry: float, executed_qty: float
 # ====== SNAPSHOT METRICS ======
 """Periodic account snapshots stored in memory for the metrics dashboard: balance, margin level, debt, and trade activity."""
 
-# --- SNAPSHOT PLACEHOLDERS
+# --- SNAPSHOT PLACEHOLDERS ---
 SNAPSHOT_HISTORY = []
 SNAPSHOT_LOCK = Lock()
 
@@ -1255,7 +1314,11 @@ def store_snapshot(snapshot):
             "longsToday": snapshot["longsToday"],
             "shortsToday": snapshot["shortsToday"],
             "totalLongs": snapshot["totalLongs"],
-            "totalShorts": snapshot["totalShorts"]
+            "totalShorts": snapshot["totalShorts"],
+            "tradeId": snapshot["tradeId"],
+
+            # 🐍 VARIABLES SNAPSHOT
+            "variables": snapshot["variables"]
         }
 
         SNAPSHOT_HISTORY.append(clean_snapshot)
@@ -1267,6 +1330,16 @@ def store_snapshot(snapshot):
 def build_snapshot():
     acc = get_margin_account()
 
+    if isinstance(acc, dict) and acc.get("code") == -1021:
+        logger.error("⚠️ Snapshot got -1021, retrying with fresh timestamp")
+
+        time.sleep(1)
+        acc = get_margin_account()
+
+    if not isinstance(acc, dict) or "userAssets" not in acc:
+        logger.error(f"⚠️ build_snapshot: unexpected margin account response: {acc}")
+        raise Exception(f"Invalid margin account response: {acc}")
+
     total_debt = 0.0
     usdc_balance = 0.0
     usdc_borrowed = 0.0
@@ -1276,15 +1349,37 @@ def build_snapshot():
         borrowed = float(asset["borrowed"])
         free = float(asset["free"])
         locked = float(asset["locked"])
-        total_debt += borrowed
+
+        # 💳 DEBT IN USDC
+        debt_usdc = 0.0
+
+        if borrowed > 0:
+
+            if asset["asset"] == "USDC":
+                debt_usdc = borrowed
+
+            else:
+                try:
+                    symbol = f"{asset['asset']}USDC"
+                    r = request_with_retries("GET", f"{BASE_URL}/api/v3/ticker/price", params={"symbol": symbol})
+                    price = float(r["price"])
+                    debt_usdc = borrowed * price
+
+                except Exception as e:
+                    logger.error(f"⚠️ Could not convert debt for {asset['asset']} to USDC: {e}")
+
+            total_debt += debt_usdc
+
         total_asset_balance = free + locked
 
         if total_asset_balance > 0 and asset["asset"] != "USDC":
-            assets_with_balance.append({"asset": asset["asset"], "balance": round(total_asset_balance, 8)})
+            assets_with_balance.append({ "asset": asset["asset"], "balance": round(total_asset_balance, 8)})
 
         if asset["asset"] == "USDC":
             usdc_balance = free + locked
             usdc_borrowed = borrowed
+
+    btc_usdc_price = 0.0
 
     try:
         r = request_with_retries("GET", f"{BASE_URL}/api/v3/ticker/price", params={"symbol": "BTCUSDC"})
@@ -1315,18 +1410,18 @@ def build_snapshot():
         "totalLongs": TOTAL_LONGS,
         "totalShorts": TOTAL_SHORTS,
         "tradeId": TRADE_COUNTER,
+        "lastTrade": LAST_TRADE,
 
         # 🐍 VARIABLES SNAPSHOT
         "variables": {
             # 🎚 BOOL VARS
             "trading": TRADING,
-            "testnet": TESTNET,
             "sl_override": SL_OVERRIDE,
             "tp_override": TP_OVERRIDE,
             "log_debug": LOG_DEBUG,
 
             # 🔤 STRING VARS
-            "algorithm": ALGORITHM,
+            "platform": PLATFORM,
 
             # 🔢 ENV VARS
             "sl_pct": SL_PCT,
@@ -1341,37 +1436,51 @@ def build_snapshot():
 
     return snapshot
 
-# --- SNAPSHOT WORKERS ---
+# --- SNAPSHOT TIME ---
+def snapshot_time():
+    now = datetime.utcnow()
+    next_midnight = (now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1))
+    return (next_midnight - now).total_seconds()
+
+# --- SNAPSHOT WORKER ---
 def snapshot_worker():
     while True:
+        sleep_seconds = max(1, snapshot_time())
+        time.sleep(sleep_seconds)
+
         try:
-            if SNAPSHOT_INTERVAL == 1:
-                word = "day"
-            else:
-                word = "days"
             snapshot = build_snapshot()
             store_snapshot(snapshot)
-
-            if LOG_DEBUG:
-                logger.admin(f"📋 Snapshot stored: {snapshot}")
-            else:
-                logger.info("📸 Snapshot stored")
-
-            logger.info(f"⏰ Next snapshot in {SNAPSHOT_INTERVAL} {word}")
-            time.sleep(SNAPSHOT_INTERVAL * 86400)
-
+            logger.info("📸 Daily snapshot stored\n")
         except Exception as e:
-            logger.error(f"⚠️ Snapshot error: {e}")
-            logger.info(f"⏰ Next snapshot attempt in {SNAPSHOT_INTERVAL} {word}")
-            time.sleep(SNAPSHOT_INTERVAL * 86400)
+            logger.error(f"⚠️ Snapshot error: {e}\n")
+            time.sleep(300)
 
 # --- SNAPSHOT EXECUTION ---
 try:
     Thread(target=snapshot_worker, daemon=True).start()
     logger.info("📷 Snapshot worker started")
 except Exception as e:
-    logger.error(f"❌ Error starting snapshot workers: {e}")
+    logger.error(f"❌ Error starting snapshot worker: {e}")
     raise
+
+
+# ====== HISTORY ======
+"""Stores every trade into a trade history file you can check."""
+
+# --- TRADE HISTORY PLACEHOLDERS ---
+TRADE_HISTORY = []
+TRADE_HISTORY_LOCK = Lock()
+
+# --- STORE TRADE HISTORY ---
+def store_trade(trade):
+    global TRADE_HISTORY
+
+    with TRADE_HISTORY_LOCK:
+        TRADE_HISTORY.append(trade)
+
+        if len(TRADE_HISTORY) > 100000:
+            TRADE_HISTORY.pop(0)
 
 
 # ====== MILESTONES ======
@@ -1458,10 +1567,10 @@ logger.info("________________________________________\n")
 # --- ADMIN CLEAR ---
 def clear(symbol=None):
     if symbol:
-        logger.admin(f"🔁 ADMIN ACTION: Converting {symbol} to USDC...")
+        logger_admin(f"🔁 ADMIN ACTION: Converting {symbol} to USDC...")
         cancel(symbol)
     else:
-        logger.admin("🔁 ADMIN ACTION: Converting ALL assets to USDC...")
+        logger_admin("🔁 ADMIN ACTION: Converting ALL assets to USDC...")
         cancel_all()
 
     time.sleep(2)
@@ -1505,22 +1614,23 @@ def clear(symbol=None):
 
 # --- ADMIN BORROW ---
 def borrow(amount: float):
-    logger.admin(f"📥 ADMIN ACTION: Borrow requested: {amount} USDC")
+    asset = "USDC"
+    logger_admin(f"📥 ADMIN ACTION: Borrow requested: {amount} {asset}")
 
     if amount <= 0:
         raise ValueError("Borrow amount must be > 0")
 
     acc = get_margin_account()
     margin_level = float(acc["marginLevel"])
-    logger.admin(f"🧮 Current ML: {margin_level:.2f}")
+    logger_admin(f"🧮 Current ML: {margin_level:.2f}")
 
     if margin_level < ML_WARNING:
         logger.error(f"⚠️ Margin level too low for leveraging")
-        raise Exception("❌ Margin level too low to safely borrow USDC")
+        raise Exception("❌ Margin level too low to safely borrow {asset}")
 
     # 📥 LEVERAGE BORROW PARAMS
     params = {
-        "asset": "USDC",
+        "asset": asset,
         "amount": format(amount, "f"),
         "timestamp": _now_ms()
     }
@@ -1531,12 +1641,13 @@ def borrow(amount: float):
     if err:
         return err
 
-    logger.admin(f"✅ BORROW completed: {amount} USDC\n")
+    logger_admin(f"✅ BORROW completed: {amount} {asset}\n")
     return resp
 
 # --- ADMIN REPAY ---
 def repay(amount):
-    logger.admin(f"💳 ADMIN ACTION: Repay requested: {amount}")
+    asset = "USDC"
+    logger_admin(f"💳 ADMIN ACTION: Repay requested: {amount} {asset}")
 
     if isinstance(amount, str) and amount.lower() == "all":
         margin_info = get_margin_account()
@@ -1548,11 +1659,11 @@ def repay(amount):
                 break
 
         if borrowed_usdc <= 0:
-            logger.admin("ℹ️ No USDC debt to repay")
+            logger_admin("ℹ️ No {asset} debt to repay")
             return {"status": "nothing_to_repay"}
 
         amount = borrowed_usdc
-        logger.admin(f"🔁 REPAY ALL → {amount} USDC")
+        logger_admin(f"🔁 REPAY ALL → {amount} {asset}")
 
     amount = Decimal(str(amount))
 
@@ -1561,7 +1672,7 @@ def repay(amount):
 
     # 💳 LEVERAGE REPAY PARAMS
     params = {
-        "asset": "USDC",
+        "asset": asset,
         "amount": format(amount, "f"),
         "timestamp": _now_ms()
     }
@@ -1572,7 +1683,7 @@ def repay(amount):
     if err:
         return err
 
-    logger.admin(f"✅ REPAY completed: {amount} USDC\n")
+    logger_admin(f"✅ REPAY completed: {amount} {asset}\n")
     return resp
 
 # --- ADMIN SET VAR ---
@@ -1618,7 +1729,6 @@ def set_var(var_name, value):
             except Exception:
                 return {"status": "error", "msg": f"invalid value for {var_name}"}
 
-            # Clamp solo si existen límites
             if "min" in meta and "max" in meta:
                 parsed = max(meta["min"], min(parsed, meta["max"]))
 
@@ -1626,11 +1736,11 @@ def set_var(var_name, value):
 
         # 🔁 APPLY CHANGE
         if current_value == parsed:
-            logger.admin(f"{emoji} {meta['var']} already {parsed}\n")
+            logger_admin(f"{emoji} {meta['var']} already {parsed}\n")
             return {"status": "ok", "var": vn, "value": parsed, "no_change": True}
 
         globals()[meta["var"]] = parsed
-        logger.admin(f"{emoji} ADMIN ACTION: {meta['var']} → {parsed}\n")
+        logger_admin(f"{emoji} ADMIN ACTION: {meta['var']} → {parsed}\n")
 
         return {"status": "ok", "var": vn, "value": parsed}
 
@@ -1640,39 +1750,33 @@ def set_var(var_name, value):
 
 # --- ADMIN RESTORE ---
 def restore():
-    global TRADING, TESTNET, SL_OVERRIDE, TP_OVERRIDE, LOG_DEBUG, ALGORITHM, SL_PCT, TP_PCT, LOGIN_LIMIT, LOGIN_RETRY, SESSION_TIME
+    global TRADING, SL_OVERRIDE, TP_OVERRIDE, LOG_DEBUG, SL_PCT, TP_PCT, LOGIN_LIMIT, LOGIN_RETRY, SESSION_TIME
 
-    logger.admin("💣 ADMIN ACTION: RESTORE default trading parameters")
+    logger_admin("💣 ADMIN ACTION: RESTORE default trading parameters")
     TRADING = DFT_TRADING
-    TESTNET = DFT_TESTNET
     SL_OVERRIDE = DFT_SL_OVERRIDE
     TP_OVERRIDE = DFT_TP_OVERRIDE
     LOG_DEBUG = DFT_LOG_DEBUG
-    ALGORITHM = DFT_ALGORITHM
     SL_PCT = DFT_SL_PCT
     TP_PCT = DFT_TP_PCT
     LOGIN_LIMIT = DFT_LOGIN_LIMIT
     LOGIN_RETRY = DFT_LOGIN_RETRY
     SESSION_TIME = DFT_SESSION_TIME
-    logger.admin(f"🔄 TRADING restored → {TRADING}")
-    logger.admin(f"🔄 TESTNET restored → {TESTNET}")
-    logger.admin(f"🔄 SL_OVERRIDE restored → {SL_OVERRIDE}")
-    logger.admin(f"🔄 TP_OVERRIDE restored → {TP_OVERRIDE}")
-    logger.admin(f"🔄 LOG_DEBUG restored → {LOG_DEBUG}")
-    logger.admin(f"🔄 ALGORITHM restored → {ALGORITHM}")
-    logger.admin(f"🔄 SL_PCT restored → {SL_PCT}")
-    logger.admin(f"🔄 TP_PCT restored → {TP_PCT}")
-    logger.admin(f"🔄 LOGIN_LIMIT restored → {LOGIN_LIMIT}")
-    logger.admin(f"🔄 LOGIN_RETRY restored → {LOGIN_RETRY}")
-    logger.admin(f"🔄 SESSION_TIME restored → {SESSION_TIME}")
+    logger_admin(f"🔄 TRADING restored → {TRADING}")
+    logger_admin(f"🔄 SL_OVERRIDE restored → {SL_OVERRIDE}")
+    logger_admin(f"🔄 TP_OVERRIDE restored → {TP_OVERRIDE}")
+    logger_admin(f"🔄 LOG_DEBUG restored → {LOG_DEBUG}")
+    logger_admin(f"🔄 SL_PCT restored → {SL_PCT}")
+    logger_admin(f"🔄 TP_PCT restored → {TP_PCT}")
+    logger_admin(f"🔄 LOGIN_LIMIT restored → {LOGIN_LIMIT}")
+    logger_admin(f"🔄 LOGIN_RETRY restored → {LOGIN_RETRY}")
+    logger_admin(f"🔄 SESSION_TIME restored → {SESSION_TIME}")
     logger.info("✅ RESTORE completed\n")
     return {
         "TRADING": TRADING,
-        "TESTNET": TESTNET,
         "SL_OVERRIDE": SL_OVERRIDE,
         "TP_OVERRIDE": TP_OVERRIDE,
         "LOG_DEBUG": LOG_DEBUG,
-        "ALGORITHM": ALGORITHM,
         "status": "ok",
         "SL_PCT": SL_PCT,
         "TP_PCT": TP_PCT,
@@ -1684,11 +1788,9 @@ def restore():
 # --- SETTABLE VARS ---
 SETTABLE_VARS = {
     "trading":      {"type": "bool", "var": "TRADING",      "emoji_on": "▶", "emoji_off": "⏸"},
-    "testnet":      {"type": "bool", "var": "TESTNET",      "emoji_on": "🧪", "emoji_off": "🌐"},
     "sl_override":  {"type": "bool", "var": "SL_OVERRIDE",  "emoji_on": "🟢", "emoji_off": "🔴"},
     "tp_override":  {"type": "bool", "var": "TP_OVERRIDE",  "emoji_on": "🟢", "emoji_off": "🔴"},
     "log_debug":    {"type": "bool", "var": "LOG_DEBUG",    "emoji_on": "📋", "emoji_off": "🔎"},
-    "algorithm":    {"type": str,    "var": "ALGORITHM",    "var_emoji": "🧠", "allowed": list(hashlib.algorithms_guaranteed)},
     "sl_pct":       {"type": float,  "var": "SL_PCT",       "var_emoji": "🔴", "min": MIN_SL_PCT,       "max": MAX_SL_PCT},
     "tp_pct":       {"type": float,  "var": "TP_PCT",       "var_emoji": "🟢", "min": MIN_TP_PCT,       "max": MAX_TP_PCT},
     "login_limit":  {"type": int,    "var": "LOGIN_LIMIT",  "var_emoji": "🛠", "min": MIN_LOGIN_LIMIT,  "max": MAX_LOGIN_LIMIT},
@@ -1719,14 +1821,14 @@ def create_admin_session(ip):
         ADMIN_SESSIONS[ip] = time.time()
         if ip in LOGIN_ATTEMPTS:
             del LOGIN_ATTEMPTS[ip]
-    logger.admin(f"🔓 Admin session opened for {ip}\n")
+    logger_admin(f"🔓 Admin session opened for {ip}\n")
 
 # --- ADMIN SESSION CLOSING ---
 def destroy_admin_session(ip):
     with ADMIN_SESSIONS_LOCK:
         if ip in ADMIN_SESSIONS:
             del ADMIN_SESSIONS[ip]
-            logger.admin(f"🔐 Admin session closed for {ip}\n")
+            logger_admin(f"🔐 Admin session closed for {ip}\n")
 
 # --- ADMIN SESSION EXPIRING ---
 def is_admin_authenticated():
@@ -1736,7 +1838,7 @@ def is_admin_authenticated():
             return False
         last_activity = ADMIN_SESSIONS[ip]
         if time.time() - last_activity > (SESSION_TIME * 60):
-            logger.admin(f"🔒 Admin session expired for {ip}\n")
+            logger_admin(f"🔒 Admin session expired for {ip}\n")
             del ADMIN_SESSIONS[ip]
             return False
         ADMIN_SESSIONS[ip] = time.time()
@@ -1760,6 +1862,13 @@ def is_rate_limited(ip):
 
     return len(attempts) > LOGIN_LIMIT
 
+# --- ADMIN LOGGING ---
+LOG_LOCK = Lock()
+
+def logger_admin(msg):
+    with LOG_LOCK:
+        logger.admin(msg)
+
 
 # ====== FLASK WEBHOOK ======
 """Webhook endpoint that receives trading signals, validates them, and dispatches trade execution in a background thread."""
@@ -1769,6 +1878,7 @@ TRADE_LOCK = threading.RLock()
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
+
     # 📝 DATA EXCTRACTION
     try:
         data = request.get_json(force=True)
@@ -1785,12 +1895,14 @@ def webhook():
         return response
 
     # ❓ RETURN FOR MISSING DATA
-    if "symbol" not in data or "side" not in data:
+    if "symbol" not in data or "side" not in data or "strategy" not in data:
         logger.info(f"📩 JSON received: {sanitize_payload(data)}")
         if "symbol" not in data:
             logger.error("❓ Missing trading fields: symbol")
         if "side" not in data:
             logger.error("❓ Missing trading fields: side")
+        if "strategy" not in data:
+            logger.error("❓ Missing trading fields: strategy")
         return jsonify({"error": "Missing trading fields\n"}), 400
 
     # 🚫 RETURN FOR INCORRECT KEY
@@ -1810,47 +1922,49 @@ def webhook():
 def process_trade(data):
     symbol = data["symbol"]
     side = data["side"].upper()
+    strategy = data["strategy"]
     start = time.time()
 
     try:
         with TRADE_LOCK:
+            with LOG_LOCK:
 
-            # 📩 JSON RECEIVING
-            logger.info(f"📩 JSON received: {sanitize_payload(data)}")
+                # 📩 JSON RECEIVING
+                logger.info(f"📩 JSON received: {sanitize_payload(data)}")
 
-            # ⛔ DANGEROUS MARGIN LEVEL
-            if not check_margin_level():
-                logger.error("⛔ Trading blocked (critical margin condition)\n")
-                return
+                # ⛔ DANGEROUS MARGIN LEVEL
+                if not check_margin_level():
+                    logger.error("⛔ Trading blocked (critical margin condition)\n")
+                    return
 
-            # ⛔ TRADING BLOCKING
-            if TRADING_BLOCKED:
-                logger.error("⛔ Trading blocked by margin safety system\n")
-                return
+                # ⛔ TRADING BLOCKING
+                if TRADING_BLOCKED:
+                    logger.error("⛔ Trading blocked by margin safety system\n")
+                    return
 
-            # 🧹 PRE-TRADE CLEANUP
-            cancel(symbol)
-            cleanup(symbol)
+                # 🧹 PRE-TRADE CLEANUP
+                cancel(symbol)
+                cleanup(symbol)
 
-            # 💹 MARKET BUY / SELL AND OCO
-            if side == "BUY":
-                resp = execute_long_margin(symbol, webhook_data=data)
-                trade_id = resp.get("trade_id") if resp else "UNKNOWN"
-            elif side == "SELL":
-                resp = execute_short_margin(symbol, webhook_data=data)
-                trade_id = resp.get("trade_id") if resp else "UNKNOWN"
-            else:
-                logger.error("⛔ Trading blocked due to invalid side\n")
-                return
+                # 💹 MARKET BUY / SELL AND OCO
+                if side == "BUY":
+                    resp = execute_long_margin(symbol, strategy, webhook_data=data)
+                    trade_id = resp.get("trade_id") if resp else "UNKNOWN"
+                elif side == "SELL":
+                    resp = execute_short_margin(symbol, strategy, webhook_data=data)
+                    trade_id = resp.get("trade_id") if resp else "UNKNOWN"
+                else:
+                    logger.error("⛔ Trading blocked due to invalid side\n")
+                    return
 
-            # 📋 PRINT SYMBOL INFO
-            if LOG_DEBUG:
-                symbol_info = SYMBOL_INFO_MAP.get(symbol)
-                logger.info(f"📋 {symbol} info: {symbol_info}")
+                # 📋 PRINT SYMBOL INFO
+                if LOG_DEBUG:
+                    symbol_info = SYMBOL_INFO_MAP.get(symbol)
+                    logger_admin(f"📋 {symbol} info: {symbol_info}")
 
-            # ⏳ LATENCY
-            latency = time.time() - start
-            logger.info(f"[TRADE {trade_id}] ⏳ Trade execution latency: {latency:.2f}s\n")
+                # ⏳ LATENCY
+                latency = time.time() - start
+                logger.info(f"[TRADE {trade_id}] ⏳ Trade execution latency: {latency:.2f}s\n")
 
     except Exception as e:
         logger.error(f"🔥 CRITICAL TRADE ERROR: {e}\n", exc_info=True)
@@ -1955,16 +2069,23 @@ def health():
 
 @app.route("/snapshot", methods=["GET"])
 def admin_snapshot():
+
     if not is_admin_authenticated():
         return handle_unauthorized()
 
     try:
+
         snapshot = build_snapshot()
         milestones = check_milestones(snapshot["totalBalanceUSDC"])
         snapshot["milestonesReached"] = milestones
+
+        if LOG_DEBUG:
+            logger_admin(f"📋 SNAPSHOT_HISTORY SIZE = {len(SNAPSHOT_HISTORY)}")
+
         return jsonify(snapshot), 200
+
     except Exception as e:
-        logger.error(f"⚠️ Snapshot endpoint error: {e}", exc_info=True)
+        logger.error(f"⚠️ Snapshot endpoint error: {e}, exc_info=True")
         return jsonify({"error": str(e)}), 500
 
 
@@ -1989,7 +2110,7 @@ def index():
     <html>
     <head>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <meta name="description" content="SGNT — Automated margin trading system for Binance Cross Margin.">
+        <meta name="description" content="SGNT — Automated margin trading system.">
         <title>SGNT</title>
         <link rel="icon" type="image/png" href="/static/sgnticon.png">
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
@@ -2188,8 +2309,8 @@ def login():
     <html>
     <head>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <meta name="description" content="SGNT — Automated margin trading system for Binance Cross Margin.">
-        <title>SGNT Login</title>
+        <meta name="description" content="SGNT — Automated margin trading system.">
+        <title>SGNT • Login</title>
         <link rel="icon" type="image/png" href="/static/sgnticon.png">
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
         <style>
@@ -2283,16 +2404,35 @@ def dashboard():
     <html>
     <head>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <meta name="description" content="SGNT — Automated margin trading system for Binance Cross Margin.">
-        <title>SGNT Dashboard</title>
+        <meta name="description" content="SGNT — Automated margin trading system.">
+        <title>SGNT • Dashboard</title>
         <link rel="icon" type="image/png" href="/static/sgnticon.png">
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
         <style>
             *{box-sizing:border-box;margin:0;padding:0}
-            body{background:#0f172a;color:#e2e8f0;font-family:'Inter',sans-serif;padding:20px;font-size:14px;transition:background 0.2s,color 0.2s}
+            body{background:#0f172a;color:#e2e8f0;font-family:'Inter',sans-serif;font-size:14px;transition:background 0.2s,color 0.2s}
             body.light{background:#f8fafc;color:#0f172a}
-            .topbar{display:flex;justify-content:space-between;align-items:center;padding:0 0 14px;border-bottom:0.5px solid #1e293b;margin-bottom:4px}
-            body.light .topbar{border-bottom-color:#e2e8f0}
+
+            /* ── LAYOUT ── */
+            .layout{display:flex;min-height:100vh}
+            .sidebar{width:160px;min-width:160px;background:#0a1120;border-right:0.5px solid #1e293b;display:flex;flex-direction:column;padding:16px 0;position:fixed;top:0;left:0;height:100vh;z-index:50}
+            body.light .sidebar{background:#f1f5f9;border-right-color:#e2e8f0}
+            .main{margin-left:160px;display:flex;flex-direction:column;flex:1;min-height:100vh}
+            .topbar{position:fixed;top:0;left:160px;right:0;z-index:40;display:flex;justify-content:space-between;align-items:center;padding:0 20px;height:48px;background:#0f172a;border-bottom:0.5px solid #1e293b}
+            body.light .topbar{background:#f8fafc;border-bottom-color:#e2e8f0}
+            .content{padding:20px;margin-top:48px}
+
+            /* ── SIDEBAR ── */
+            .sidebar-logo{display:flex;align-items:center;justify-content:center;padding:0 16px 16px;border-bottom:0.5px solid #1e293b;margin-bottom:8px}
+            body.light .sidebar-logo{border-bottom-color:#e2e8f0}
+            .nav-item{display:flex;align-items:center;gap:8px;padding:8px 16px;font-size:11px;letter-spacing:0.06em;text-transform:uppercase;color:#475569;text-decoration:none;cursor:pointer;transition:0.15s;border-left:2px solid transparent;font-family:'Courier New',monospace}
+            .nav-item:hover{color:#94a3b8;background:rgba(255,255,255,0.03)}
+            body.light .nav-item:hover{background:rgba(0,0,0,0.04)}
+            .nav-item.active{color:#f1f5f9;border-left-color:#1D9E75;background:rgba(29,158,117,0.08)}
+            body.light .nav-item.active{color:#0f172a;border-left-color:#1D9E75;background:rgba(29,158,117,0.1)}
+            body.light .nav-item{color:#64748b}
+
+            /* ── TOPBAR ── */
             .topbar-left{display:flex;align-items:center;gap:10px}
             .topbar-right{display:flex;align-items:center;gap:8px}
             .dot{width:8px;height:8px;border-radius:50%;background:#1D9E75;display:inline-block}
@@ -2302,10 +2442,12 @@ def dashboard():
             .tag{font-size:12px;padding:2px 8px;border-radius:6px;border:0.5px solid;font-family:'Courier New',monospace}
             .tag-live{border-color:#1D9E75;color:#1D9E75}
             .tag-testnet{border-color:#BA7517;color:#BA7517}
-            .theme-toggle{background:none;border:0.5px solid #334155;border-radius:20px;padding:4px 10px;cursor:pointer;font-size:13px;color:#94a3b8;transition:0.15s;display:flex;align-items:center;gap:6px}
+            .theme-toggle{background:none;border:0.5px solid #334155;border-radius:20px;padding:4px 10px;cursor:pointer;font-size:13px;color:#94a3b8;transition:0.15s}
             body.light .theme-toggle{border-color:#cbd5e1;color:#64748b}
             .theme-toggle:hover{background:#1e293b}
             body.light .theme-toggle:hover{background:#e2e8f0}
+
+            /* ── CARDS ── */
             .db{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;padding:12px 0}
             .card{background:#1e293b;border:0.5px solid #334155;border-radius:8px;padding:14px 16px}
             body.light .card{background:#ffffff;border-color:#e2e8f0}
@@ -2347,8 +2489,6 @@ def dashboard():
             .btn-minmax:hover{background:#1e293b;color:#94a3b8}
             body.light .btn-minmax{border-color:#cbd5e1;color:#94a3b8}
             body.light .btn-minmax:hover{background:#e2e8f0}
-            .col-full{grid-column:1/-1}
-            .col-2{grid-column:span 2}
             .section-label{font-size:12px;letter-spacing:0.08em;color:#475569;text-transform:uppercase;margin:10px 0 4px;grid-column:1/-1;padding-left:2px}
             .asset-row{display:flex;justify-content:space-between;font-size:12px;padding:2px 0;color:#94a3b8}
             .margin-bar-bg{height:4px;background:#334155;border-radius:4px;margin-top:4px;overflow:hidden}
@@ -2364,6 +2504,19 @@ def dashboard():
             .milestone-sub{font-size:12px;color:#64748b;margin-bottom:20px;line-height:1.6}
             .milestone-close{padding:8px 24px;font-size:11px;border:0.5px solid #334155;border-radius:6px;background:transparent;color:#94a3b8;cursor:pointer;letter-spacing:0.06em;text-transform:uppercase}
             .milestone-close:hover{background:#334155;color:#f1f5f9}
+            @media(max-width:600px){
+                .sidebar{display:none}
+                .main{margin-left:0}
+                .topbar{left:0}
+                .db{grid-template-columns:1fr}
+                .metric-big{font-size:18px}
+                .btn{min-height:36px;padding:8px 12px}
+                .btn-minmax{min-height:32px;padding:6px 8px}
+                .input-row input[type=number],.input-row input[type=text]{min-height:36px}
+                .toggle{width:40px;height:22px}
+                .slider:before{width:16px;height:16px}
+                input:checked+.slider:before{transform:translateX(18px)}
+            }
         </style>
     </head>
     <body>
@@ -2377,159 +2530,178 @@ def dashboard():
         </div>
     </div>
 
-    <div class="topbar">
-        <div class="topbar-left">
-            <span class="dot" id="dot"></span>
-            <span class="status-text" id="status-text">Loading...</span>
-            <span class="tag tag-live" id="mode-tag">LIVE</span>
-            <img src="/static/sgnticon.png" class="icon" alt="SGNT" onclick="window.location.href='/'" style="cursor: pointer; width: 25px;">
-        </div>
-        <div class="topbar-right">
-            <button class="btn" onclick="loadData()">Update</button>
-            <button class="btn btn-danger" onclick="doLogout()">Logout</button>
-            <button class="theme-toggle" onclick="toggleTheme()" id="theme-btn">🌙</button>
-        </div>
-    </div>
+    <div class="layout">
 
-    <div class="db">
-
-        <div class="section-label">Account</div>
-
-        <div class="card">
-            <div class="card-title">Total Balance</div>
-            <div class="metric-big" id="total-balance">—</div>
-            <div class="metric-label">USDC</div>
-        </div>
-        <div class="card">
-            <div class="card-title">Free USDC Balance</div>
-            <div class="metric-big" id="usdc-balance">—</div>
-            <div class="metric-label">USDC</div>
-        </div>
-        <div class="card">
-            <div class="card-title">Margin level</div>
-            <div class="metric-big" id="margin-level">—</div>
-            <div class="margin-bar-bg"><div class="margin-bar-fill" id="margin-bar" style="width:0%"></div></div>
-        </div>
-
-        <div class="card">
-            <div class="card-title">Debt</div>
-            <div class="metric-row"><span class="k">Total</span><span class="v" id="total-debt">—</span></div>
-            <div class="metric-row"><span class="k">Borrowed USDC</span><span class="v" id="usdc-borrowed">—</span></div>
-        </div>
-        <div class="card">
-            <div class="card-title">Assets with balance</div>
-            <div id="assets-list"><span style="font-size:12px;color:#475569">—</span></div>
-        </div>
-        <div class="card">
-            <div class="card-title">Last Trade</div>
-            <div class="metric-row"><span class="k">Symbol</span><span class="v" id="lt-symbol">—</span></div>
-            <div class="metric-row"><span class="k">Side</span><span class="v" id="lt-side">—</span></div>
-            <div class="metric-row"><span class="k">Qty</span><span class="v" id="lt-qty">—</span></div>
-            <div class="metric-row"><span class="k">Spent</span><span class="v" id="lt-spent">—</span></div>
-            <div class="metric-row"><span class="k">Time</span><span class="v" id="lt-time" style="font-size:10px">—</span></div>
-        </div>
-
-        <div class="section-label">Trading</div>
-
-        <div class="card">
-            <div class="card-title">Activity</div>
-            <div class="metric-row"><span class="k">Last Trade ID</span><span class="v" id="last-trade-id">—</span></div>
-            <div class="metric-row"><span class="k">Longs Today</span><span class="v" id="longs-today">—</span></div>
-            <div class="metric-row"><span class="k">Shorts Today</span><span class="v" id="shorts-today">—</span></div>
-            <div class="metric-row"><span class="k">Total Longs</span><span class="v" id="total-longs">—</span></div>
-            <div class="metric-row"><span class="k">Total Shorts</span><span class="v" id="total-shorts">—</span></div>
-        </div>
-
-        <div class="card">
-            <div class="card-title">Control</div>
-            <div class="toggle-row"><span class="toggle-label">Trading</span><label class="toggle"><input type="checkbox" id="tog-trading" onchange="setVar('trading',this.checked)"><span class="slider"></span></label></div>
-            <div class="toggle-row"><span class="toggle-label">Testnet</span><label class="toggle"><input type="checkbox" id="tog-testnet" onchange="setVar('testnet',this.checked)"><span class="slider"></span></label></div>
-            <div class="toggle-row"><span class="toggle-label">SL Override</span><label class="toggle"><input type="checkbox" id="tog-sl" onchange="setVar('sl_override',this.checked)"><span class="slider"></span></label></div>
-            <div class="toggle-row"><span class="toggle-label">TP Override</span><label class="toggle"><input type="checkbox" id="tog-tp" onchange="setVar('tp_override',this.checked)"><span class="slider"></span></label></div>
-        </div>
-
-        <div class="card">
-            <div class="card-title">Parameters</div>
-            <div style="font-size:11px;color:#64748b;margin-bottom:4px">SL % <span id="sl-val" style="color:#f1f5f9">—</span></div>
-            <div class="input-row">
-                <input type="number" id="sl-input" placeholder="{{ MIN_SL_PCT }}–{{ MAX_SL_PCT }}" step="0.1" min="{{ MIN_SL_PCT }}" max="{{ MAX_SL_PCT }}">
-                <button class="btn-minmax" onclick="setInputVal('sl-input',{{ MIN_SL_PCT }})">min</button>
-                <button class="btn-minmax" onclick="setInputVal('sl-input',{{ MAX_SL_PCT }})">max</button>
-                <button class="btn" onclick="setVar('sl_pct', document.getElementById('sl-input').value)">Set</button>
+        <!-- SIDEBAR -->
+        <nav class="sidebar">
+            <div class="sidebar-logo">
+                <img src="/static/sgnticon.png" alt="SGNT" onclick="window.location.href='/'" style="cursor:pointer;width:32px">
             </div>
-            <div style="font-size:11px;color:#64748b;margin:8px 0 4px">TP % <span id="tp-val" style="color:#f1f5f9">—</span></div>
-            <div class="input-row">
-                <input type="number" id="tp-input" placeholder="{{ MIN_TP_PCT }}–{{ MAX_TP_PCT }}" step="0.1" min="{{ MIN_TP_PCT }}" max="{{ MAX_TP_PCT }}">
-                <button class="btn-minmax" onclick="setInputVal('tp-input',{{ MIN_TP_PCT }})">min</button>
-                <button class="btn-minmax" onclick="setInputVal('tp-input',{{ MAX_TP_PCT }})">max</button>
-                <button class="btn" onclick="setVar('tp_pct', document.getElementById('tp-input').value)">Set</button>
+            <a href="/dashboard" class="nav-item active">Dashboard</a>
+            <a href="/logs" class="nav-item">Logs</a>
+            <a href="/history" class="nav-item">History</a>
+            <a href="/metrics" class="nav-item">Metrics</a>
+        </nav>
+
+        <div class="main">
+
+            <!-- TOPBAR -->
+            <div class="topbar">
+                <div class="topbar-left">
+                    <span class="dot" id="dot"></span>
+                    <span class="status-text" id="status-text">Loading...</span>
+                    <span class="tag tag-live" id="mode-tag">LIVE</span>
+                </div>
+                <div class="topbar-right">
+                    <button class="btn" onclick="loadData()">Update</button>
+                    <button class="btn btn-danger" onclick="doRestore()">Restore</button>
+                    <button class="btn btn-danger" onclick="doLogout()">Logout</button>
+                    <button class="theme-toggle" onclick="toggleTheme()" id="theme-btn">🌙</button>
+                </div>
             </div>
+
+            <!-- CONTENT -->
+            <div class="content">
+            <div class="db">
+
+                <div class="section-label">Account</div>
+
+                <div class="card">
+                    <div class="card-title">Total Equity Balance</div>
+                    <div class="metric-big" id="total-balance">—</div>
+                    <div class="metric-label">USDC</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">Free USDC Balance</div>
+                    <div class="metric-big" id="usdc-balance">—</div>
+                    <div class="metric-label">USDC</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">Margin level</div>
+                    <div class="metric-big" id="margin-level">—</div>
+                    <div class="margin-bar-bg"><div class="margin-bar-fill" id="margin-bar" style="width:0%"></div></div>
+                </div>
+
+                <div class="card">
+                    <div class="card-title">Debt</div>
+                    <div class="metric-row"><span class="k">Total</span><span class="v" id="total-debt">—</span></div>
+                    <div class="metric-row"><span class="k">Borrowed USDC</span><span class="v" id="usdc-borrowed">—</span></div>
+                </div>
+                <div class="card">
+                    <div class="card-title">Assets with balance</div>
+                    <div id="assets-list"><span style="font-size:12px;color:#475569">—</span></div>
+                </div>
+                <div class="card">
+                    <div class="card-title">Last Trade</div>
+                    <div class="metric-row"><span class="k">Symbol</span><span class="v" id="lt-symbol">—</span></div>
+                    <div class="metric-row"><span class="k">Side</span><span class="v" id="lt-side">—</span></div>
+                    <div class="metric-row"><span class="k">Qty</span><span class="v" id="lt-qty">—</span></div>
+                    <div class="metric-row"><span class="k">Spent</span><span class="v" id="lt-spent">—</span></div>
+                    <div class="metric-row"><span class="k">Time</span><span class="v" id="lt-time" style="font-size:10px">—</span></div>
+                </div>
+
+                <div class="section-label">Trading</div>
+
+                <div class="card">
+                    <div class="card-title">Activity</div>
+                    <div class="metric-row"><span class="k">Last Trade ID</span><span class="v" id="last-trade-id">—</span></div>
+                    <div class="metric-row"><span class="k">Longs Today</span><span class="v" id="longs-today">—</span></div>
+                    <div class="metric-row"><span class="k">Shorts Today</span><span class="v" id="shorts-today">—</span></div>
+                    <div class="metric-row"><span class="k">Total Longs</span><span class="v" id="total-longs">—</span></div>
+                    <div class="metric-row"><span class="k">Total Shorts</span><span class="v" id="total-shorts">—</span></div>
+                </div>
+
+                <div class="card">
+                    <div class="card-title">Control</div>
+                    <div class="toggle-row"><span class="toggle-label">Trading</span><label class="toggle"><input type="checkbox" id="tog-trading" onchange="setVar('trading',this.checked)"><span class="slider"></span></label></div>
+                    <div class="toggle-row"><span class="toggle-label">Testnet</span><label class="toggle"><input type="checkbox" id="tog-testnet" onchange="setVar('testnet',this.checked)"><span class="slider"></span></label></div>
+                    <div class="toggle-row"><span class="toggle-label">SL Override</span><label class="toggle"><input type="checkbox" id="tog-sl" onchange="setVar('sl_override',this.checked)"><span class="slider"></span></label></div>
+                    <div class="toggle-row"><span class="toggle-label">TP Override</span><label class="toggle"><input type="checkbox" id="tog-tp" onchange="setVar('tp_override',this.checked)"><span class="slider"></span></label></div>
+                </div>
+
+                <div class="card">
+                    <div class="card-title">Parameters</div>
+                    <div style="font-size:11px;color:#64748b;margin-bottom:4px">SL % <span id="sl-val" style="color:#f1f5f9">—</span></div>
+                    <div class="input-row">
+                        <input type="number" id="sl-input" placeholder="{{ MIN_SL_PCT }}–{{ MAX_SL_PCT }}" step="0.1" min="{{ MIN_SL_PCT }}" max="{{ MAX_SL_PCT }}">
+                        <button class="btn-minmax" onclick="setInputVal('sl-input',{{ MIN_SL_PCT }})">min</button>
+                        <button class="btn-minmax" onclick="setInputVal('sl-input',{{ MAX_SL_PCT }})">max</button>
+                        <button class="btn" onclick="setVar('sl_pct', document.getElementById('sl-input').value)">Set</button>
+                    </div>
+                    <div style="font-size:11px;color:#64748b;margin:8px 0 4px">TP % <span id="tp-val" style="color:#f1f5f9">—</span></div>
+                    <div class="input-row">
+                        <input type="number" id="tp-input" placeholder="{{ MIN_TP_PCT }}–{{ MAX_TP_PCT }}" step="0.1" min="{{ MIN_TP_PCT }}" max="{{ MAX_TP_PCT }}">
+                        <button class="btn-minmax" onclick="setInputVal('tp-input',{{ MIN_TP_PCT }})">min</button>
+                        <button class="btn-minmax" onclick="setInputVal('tp-input',{{ MAX_TP_PCT }})">max</button>
+                        <button class="btn" onclick="setVar('tp_pct', document.getElementById('tp-input').value)">Set</button>
+                    </div>
+                </div>
+
+                <div class="section-label">Admin</div>
+
+                <div class="card">
+                    <div class="card-title">Operations</div>
+                    <div style="font-size:11px;color:#94a3b8;margin:8px 0 4px">Borrow USDC</div>
+                    <div class="input-row">
+                        <input type="number" id="borrow-amt" placeholder="USDC quantity">
+                        <button class="btn btn-success" onclick="doBorrow()">Borrow</button>
+                    </div>
+                    <div style="font-size:11px;color:#94a3b8;margin:8px 0 4px">Repay USDC</div>
+                    <div class="input-row">
+                        <input type="text" id="repay-amt" placeholder="USDC quantity (or 'all')">
+                        <button class="btn btn-success" onclick="doRepay()">Repay</button>
+                        <button class="btn" onclick="document.getElementById('repay-amt').value='all'">All</button>
+                    </div>
+                    <div style="font-size:11px;color:#94a3b8;margin:8px 0 4px">Clear</div>
+                    <div class="input-row">
+                        <input type="text" id="clear-sym" placeholder="Symbol (empty = all)">
+                        <button class="btn btn-danger" onclick="doClear()">Clear</button>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-title">Admin Session</div>
+                    <div style="font-size:11px;color:#64748b;margin-bottom:4px">Session Time <span id="session-val" style="color:#f1f5f9">—</span> min</div>
+                    <div class="input-row">
+                        <input type="number" id="session-input" placeholder="{{ MIN_SESSION_TIME }}–{{ MAX_SESSION_TIME }}" min="{{ MIN_SESSION_TIME }}" max="{{ MAX_SESSION_TIME }}">
+                        <button class="btn-minmax" onclick="setInputVal('session-input',{{ MIN_SESSION_TIME }})">min</button>
+                        <button class="btn-minmax" onclick="setInputVal('session-input',{{ MAX_SESSION_TIME }})">max</button>
+                        <button class="btn" onclick="setVar('session_time',document.getElementById('session-input').value)">Set</button>
+                    </div>
+                    <div style="font-size:11px;color:#64748b;margin:8px 0 4px">Login Limit <span id="login-limit-val" style="color:#f1f5f9">—</span></div>
+                    <div class="input-row">
+                        <input type="number" id="login-limit-input" placeholder="{{ MIN_LOGIN_LIMIT }}–{{ MAX_LOGIN_LIMIT }}" min="{{ MIN_LOGIN_LIMIT }}" max="{{ MAX_LOGIN_LIMIT }}">
+                        <button class="btn-minmax" onclick="setInputVal('login-limit-input',{{ MIN_LOGIN_LIMIT }})">min</button>
+                        <button class="btn-minmax" onclick="setInputVal('login-limit-input',{{ MAX_LOGIN_LIMIT }})">max</button>
+                        <button class="btn" onclick="setVar('login_limit',document.getElementById('login-limit-input').value)">Set</button>
+                    </div>
+                    <div style="font-size:11px;color:#64748b;margin:8px 0 4px">Login Retry <span id="login-retry-val" style="color:#f1f5f9">—</span> min</div>
+                    <div class="input-row">
+                        <input type="number" id="login-retry-input" placeholder="{{ MIN_LOGIN_RETRY }}–{{ MAX_LOGIN_RETRY }}" min="{{ MIN_LOGIN_RETRY }}" max="{{ MAX_LOGIN_RETRY }}">
+                        <button class="btn-minmax" onclick="setInputVal('login-retry-input',{{ MIN_LOGIN_RETRY }})">min</button>
+                        <button class="btn-minmax" onclick="setInputVal('login-retry-input',{{ MAX_LOGIN_RETRY }})">max</button>
+                        <button class="btn" onclick="setVar('login_retry',document.getElementById('login-retry-input').value)">Set</button>
+                    </div>
+                </div>
+
+                <div class="card" style="display:flex;flex-direction:column;justify-content:space-between">
+                    <div class="card-title">System</div>
+                    <div style="font-size:11px;color:#64748b;margin-bottom:4px">
+                        Algorithm <span id="algo-val" style="color:#f1f5f9">—</span>
+                    </div>
+                    <div class="input-row" style="margin-bottom:8px">
+                        <select id="algo-select" style="flex:1;padding:5px 8px;font-size:12px;background:#0f172a;border:0.5px solid #334155;border-radius:6px;color:#f1f5f9;font-family:'Courier New',monospace">
+                            {{ algo_options | safe }}
+                        </select>
+                        <button class="btn" onclick="setVar('algorithm', document.getElementById('algo-select').value)">Set</button>
+                    </div>
+                    <div class="toggle-row"><span class="toggle-label">Log Debug</span><label class="toggle"><input type="checkbox" id="tog-debug" onchange="setVar('log_debug',this.checked)"><span class="slider"></span></label></div>
+                </div>
+
+            </div>
+            </div>
+
         </div>
-
-        <div class="section-label">Admin</div>
-
-        <div class="card">
-            <div class="card-title">Operations</div>
-            <div style="font-size:11px;color:#94a3b8;margin:8px 0 4px">Borrow USDC</div>
-            <div class="input-row">
-                <input type="number" id="borrow-amt" placeholder="USDC quantity">
-                <button class="btn btn-success" onclick="doBorrow()">Borrow</button>
-            </div>
-            <div style="font-size:11px;color:#94a3b8;margin:8px 0 4px">Repay USDC</div>
-            <div class="input-row">
-                <input type="text" id="repay-amt" placeholder="USDC quantity (or 'all')">
-                <button class="btn btn-success" onclick="doRepay()">Repay</button>
-                <button class="btn" onclick="document.getElementById('repay-amt').value='all'">All</button>
-            </div>
-            <div style="font-size:11px;color:#94a3b8;margin:8px 0 4px">Clear</div>
-            <div class="input-row">
-                <input type="text" id="clear-sym" placeholder="Symbol (empty = all)">
-                <button class="btn btn-danger" onclick="doClear()">Clear</button>
-            </div>
-        </div>
-
-        <div class="card">
-            <div class="card-title">Admin Session</div>
-            <div style="font-size:11px;color:#64748b;margin-bottom:4px">Session Time <span id="session-val" style="color:#f1f5f9">—</span> min</div>
-            <div class="input-row">
-                <input type="number" id="session-input" placeholder="{{ MIN_SESSION_TIME }}–{{ MAX_SESSION_TIME }}" min="{{ MIN_SESSION_TIME }}" max="{{ MAX_SESSION_TIME }}">
-                <button class="btn-minmax" onclick="setInputVal('session-input',{{ MIN_SESSION_TIME }})">min</button>
-                <button class="btn-minmax" onclick="setInputVal('session-input',{{ MAX_SESSION_TIME }})">max</button>
-                <button class="btn" onclick="setVar('session_time',document.getElementById('session-input').value)">Set</button>
-            </div>
-            <div style="font-size:11px;color:#64748b;margin:8px 0 4px">Login Limit <span id="login-limit-val" style="color:#f1f5f9">—</span></div>
-            <div class="input-row">
-                <input type="number" id="login-limit-input" placeholder="{{ MIN_LOGIN_LIMIT }}–{{ MAX_LOGIN_LIMIT }}" min="{{ MIN_LOGIN_LIMIT }}" max="{{ MAX_LOGIN_LIMIT }}">
-                <button class="btn-minmax" onclick="setInputVal('login-limit-input',{{ MIN_LOGIN_LIMIT }})">min</button>
-                <button class="btn-minmax" onclick="setInputVal('login-limit-input',{{ MAX_LOGIN_LIMIT }})">max</button>
-                <button class="btn" onclick="setVar('login_limit',document.getElementById('login-limit-input').value)">Set</button>
-            </div>
-            <div style="font-size:11px;color:#64748b;margin:8px 0 4px">Login Retry <span id="login-retry-val" style="color:#f1f5f9">—</span> min</div>
-            <div class="input-row">
-                <input type="number" id="login-retry-input" placeholder="{{ MIN_LOGIN_RETRY }}–{{ MAX_LOGIN_RETRY }}" min="{{ MIN_LOGIN_RETRY }}" max="{{ MAX_LOGIN_RETRY }}">
-                <button class="btn-minmax" onclick="setInputVal('login-retry-input',{{ MIN_LOGIN_RETRY }})">min</button>
-                <button class="btn-minmax" onclick="setInputVal('login-retry-input',{{ MAX_LOGIN_RETRY }})">max</button>
-                <button class="btn" onclick="setVar('login_retry',document.getElementById('login-retry-input').value)">Set</button>
-            </div>
-        </div>
-
-        <div class="card" style="display:flex;flex-direction:column;justify-content:space-between">
-            <div class="card-title">System</div>
-            <div style="font-size:11px;color:#64748b;margin-bottom:4px">
-                Algorithm <span id="algo-val" style="color:#f1f5f9">—</span>
-            </div>
-            <div class="input-row" style="margin-bottom:8px">
-                <select id="algo-select" style="flex:1;padding:5px 8px;font-size:12px;background:#0f172a;border:0.5px solid #334155;border-radius:6px;color:#f1f5f9;font-family:'Courier New',monospace">
-                    {{ algo_options | safe }}
-                </select>
-                <button class="btn" onclick="setVar('algorithm', document.getElementById('algo-select').value)">Set</button>
-            </div>
-            <div class="toggle-row"><span class="toggle-label">Log Debug</span><label class="toggle"><input type="checkbox" id="tog-debug" onchange="setVar('log_debug',this.checked)"><span class="slider"></span></label></div>
-            <div style="margin-top:10px"><a href="/logs"><button class="btn" style="width:100%">See logs</button></a></div>
-            <div style="margin-top:10px"><a href="/metrics"><button class="btn" style="width:100%">See metrics</button></a></div>
-            <button class="btn btn-danger" style="width:100%" onclick="doRestore()">Restore defaults</button>
-        </div>
-
     </div>
 
     <div class="toast" id="toast"></div>
@@ -2618,7 +2790,6 @@ def dashboard():
             }
             document.getElementById('assets-list').innerHTML = assetsHtml || '<span style="font-size:12px;color:#475569">No assets</span>';
 
-
             document.getElementById('tog-trading').checked = !!v.trading;
             document.getElementById('tog-testnet').checked = !!v.testnet;
             document.getElementById('tog-sl').checked = !!v.sl_override;
@@ -2655,7 +2826,6 @@ def dashboard():
                 document.getElementById('algo-val').textContent = v.algorithm;
                 document.getElementById('algo-select').value = v.algorithm;
             }
-
         }
 
         async function setVar(varName, val) {
@@ -2663,20 +2833,11 @@ def dashboard():
                 toast('Insert value', false);
                 return;
             }
-
             let parsedVal = val;
-            if (typeof val === 'boolean') {
-                parsedVal = val ? 'true' : 'false';
-            }
-
+            if (typeof val === 'boolean') parsedVal = val ? 'true' : 'false';
             const d = await api(`/set?var=${varName}&value=${encodeURIComponent(parsedVal)}`);
-
-            if (d && d.status === 'ok') {
-                toast(`${varName} updated`);
-            } else {
-                toast(d?.msg || 'Error', false);
-            }
-
+            if (d && d.status === 'ok') toast(`${varName} updated`);
+            else toast(d?.msg || 'Error', false);
             await loadData();
         }
 
@@ -2761,23 +2922,18 @@ def logs():
             for f in os.listdir("."):
                 if f.endswith(".log") and os.path.isfile(f):
                     zf.write(f)
-
         memory_file.seek(0)
         return send_file(memory_file, as_attachment=True, download_name="sgnt_logs.zip", mimetype="application/zip")
 
     if filename:
         if not filename.endswith(".log"):
             return {"error": "invalid file type"}, 400
-
         if not os.path.isfile(filename):
             return {"error": "file not found"}, 404
-
         display_name = filename
-
         if filename == "sgnt.log":
             date_str = datetime.utcnow().strftime("%Y-%m-%d")
             display_name = f"sgnt.{date_str}.log"
-
         if level:
             with open(filename, "r", encoding="utf-8") as f:
                 filtered_lines = [line for line in f if level in line]
@@ -2787,7 +2943,6 @@ def logs():
                 mimetype="text/plain",
                 headers={"Content-Disposition": f"attachment; filename={download_name}"}
             )
-
         return send_file(filename, as_attachment=True, download_name=display_name, mimetype="text/plain")
 
     log_files = []
@@ -2799,7 +2954,6 @@ def logs():
             if f == "sgnt.log":
                 date_str = datetime.utcnow().strftime("%Y-%m-%d")
                 display_name = f"sgnt.{date_str}.log"
-
             log_files.append({
                 "name": f,
                 "display": display_name,
@@ -2820,29 +2974,44 @@ def logs():
     <html>
     <head>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <meta name="description" content="SGNT — Automated margin trading system for Binance Cross Margin.">
-        <title>SGNT Logs</title>
+        <meta name="description" content="SGNT — Automated margin trading system.">
+        <title>SGNT • Logs</title>
         <link rel="icon" type="image/png" href="/static/sgnticon.png">
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
         <style>
             *{box-sizing:border-box;margin:0;padding:0}
-            body{background:#0f172a;color:#e2e8f0;font-family:'Inter',sans-serif;padding:20px;font-size:14px;transition:background 0.2s,color 0.2s}
+            body{background:#0f172a;color:#e2e8f0;font-family:'Inter',sans-serif;font-size:14px;transition:background 0.2s,color 0.2s}
             body.light{background:#f8fafc;color:#0f172a}
-            .topbar{display:flex;justify-content:space-between;align-items:center;padding:0 0 14px;border-bottom:0.5px solid #1e293b;margin-bottom:16px}
-            body.light .topbar{border-bottom-color:#e2e8f0}
-            .topbar-left{display:flex;align-items:center;gap:12px}
+            .layout{display:flex;min-height:100vh}
+            .sidebar{width:160px;min-width:160px;background:#0a1120;border-right:0.5px solid #1e293b;display:flex;flex-direction:column;padding:16px 0;position:fixed;top:0;left:0;height:100vh;z-index:50}
+            body.light .sidebar{background:#f1f5f9;border-right-color:#e2e8f0}
+            .main{margin-left:160px;display:flex;flex-direction:column;flex:1;min-height:100vh}
+            .topbar{position:fixed;top:0;left:160px;right:0;z-index:40;display:flex;justify-content:space-between;align-items:center;padding:0 20px;height:48px;background:#0f172a;border-bottom:0.5px solid #1e293b}
+            body.light .topbar{background:#f8fafc;border-bottom-color:#e2e8f0}
+            .content{padding:20px;margin-top:48px}
+            .sidebar-logo{display:flex;align-items:center;justify-content:center;padding:0 16px 16px;border-bottom:0.5px solid #1e293b;margin-bottom:8px}
+            body.light .sidebar-logo{border-bottom-color:#e2e8f0}
+            .nav-item{display:flex;align-items:center;gap:8px;padding:8px 16px;font-size:11px;letter-spacing:0.06em;text-transform:uppercase;color:#475569;text-decoration:none;cursor:pointer;transition:0.15s;border-left:2px solid transparent;font-family:'Courier New',monospace}
+            .nav-item:hover{color:#94a3b8;background:rgba(255,255,255,0.03)}
+            body.light .nav-item:hover{background:rgba(0,0,0,0.04)}
+            .nav-item.active{color:#f1f5f9;border-left-color:#1D9E75;background:rgba(29,158,117,0.08)}
+            body.light .nav-item.active{color:#0f172a;border-left-color:#1D9E75;background:rgba(29,158,117,0.1)}
+            body.light .nav-item{color:#64748b}
+            .topbar-left{display:flex;align-items:center;gap:10px}
             .topbar-right{display:flex;align-items:center;gap:8px}
             .topbar-title{font-size:13px;font-weight:500;color:#f1f5f9}
             body.light .topbar-title{color:#0f172a}
+            .theme-toggle{background:none;border:0.5px solid #334155;border-radius:20px;padding:4px 10px;cursor:pointer;font-size:13px;color:#94a3b8;transition:0.15s}
+            body.light .theme-toggle{border-color:#cbd5e1;color:#64748b}
+            .theme-toggle:hover{background:#1e293b}
+            body.light .theme-toggle:hover{background:#e2e8f0}
             .btn{padding:5px 12px;font-size:11px;border:0.5px solid #334155;border-radius:6px;background:#0f172a;color:#94a3b8;cursor:pointer;white-space:nowrap;transition:0.15s;text-decoration:none;display:inline-block}
             body.light .btn{background:#f8fafc;border-color:#cbd5e1;color:#64748b}
             .btn:hover{background:#1e293b;color:#f1f5f9}
             body.light .btn:hover{background:#e2e8f0;color:#0f172a}
+            .btn-danger{border-color:#7f1d1d;color:#fca5a5}
+            .btn-danger:hover{background:#450a0a}
             .btn-blue{border-color:#1e40af;color:#93c5fd}
-            .theme-toggle{background:none;border:0.5px solid #334155;border-radius:20px;padding:4px 10px;cursor:pointer;font-size:13px;color:#94a3b8;transition:0.15s;display:flex;align-items:center;gap:6px}
-            body.light .theme-toggle{border-color:#cbd5e1;color:#64748b}
-            .theme-toggle:hover{background:#1e293b}
-            body.light .theme-toggle:hover{background:#e2e8f0}
             .refresh-toggle{display:flex;align-items:center;gap:6px;font-size:11px;color:#64748b;font-family:'Courier New',monospace}
             .toggle{position:relative;width:28px;height:15px;cursor:pointer}
             .toggle input{opacity:0;width:0;height:0}
@@ -2852,16 +3021,11 @@ def logs():
             input:checked+.slider:before{transform:translateX(13px);background:white}
             .btn-group{display:flex;gap:4px;flex-wrap:wrap}
             .filter-btn{padding:3px 10px;font-size:10px;border:0.5px solid;border-radius:4px;cursor:pointer;background:transparent;font-family:'Courier New',monospace;letter-spacing:0.04em}
-            .f-info{border-color:#16a34a;color:#4ade80}
-            .f-info:hover{background:#052e16}
-            .f-warning{border-color:#b45309;color:#fbbf24}
-            .f-warning:hover{background:#1c0f00}
-            .f-error{border-color:#991b1b;color:#fca5a5}
-            .f-error:hover{background:#450a0a}
-            .f-admin{border-color:#6d28d9;color:#c4b5fd}
-            .f-admin:hover{background:#1e0a3c}
-            .f-date{border-color:#0e7490;color:#67e8f9}
-            .f-date:hover{background:#001f2b}
+            .f-info{border-color:#16a34a;color:#4ade80}.f-info:hover{background:#052e16}
+            .f-warning{border-color:#b45309;color:#fbbf24}.f-warning:hover{background:#1c0f00}
+            .f-error{border-color:#991b1b;color:#fca5a5}.f-error:hover{background:#450a0a}
+            .f-admin{border-color:#6d28d9;color:#c4b5fd}.f-admin:hover{background:#1e0a3c}
+            .f-date{border-color:#0e7490;color:#67e8f9}.f-date:hover{background:#001f2b}
             .section-label{font-size:10px;letter-spacing:0.08em;color:#475569;text-transform:uppercase;margin:20px 0 8px;padding-left:2px}
             pre{background:#1e293b;border:0.5px solid #334155;border-radius:8px;padding:14px 16px;max-height:400px;overflow-y:auto;font-family:'Courier New',monospace;font-size:11px;line-height:1.7;color:#94a3b8;white-space:pre-wrap;word-break:break-all}
             body.light pre{background:#f1f5f9;border-color:#cbd5e1;color:#475569}
@@ -2882,74 +3046,85 @@ def logs():
             .td-name{color:#f1f5f9;font-family:'Courier New',monospace}
             body.light .td-name{color:#0f172a}
             .td-muted{color:#64748b}
+            @media(max-width:600px){.sidebar{display:none}.main{margin-left:0}.topbar{left:0}}
         </style>
     </head>
     <body>
 
-    <div class="topbar">
-        <div class="topbar-left">
-            <a href="/dashboard" class="btn">← Dashboard</a>
-            <img src="/static/sgnticon.png" class="icon" alt="SGNT" onclick="window.location.href='/'" style="cursor: pointer; width: 25px;">
-            <span class="topbar-title">Logs</span>
-        </div>
-        <div class="topbar-right">
-            <div class="refresh-toggle">
-                <label class="toggle">
-                    <input type="checkbox" id="auto-refresh" onchange="toggleRefresh(this.checked)">
-                    <span class="slider"></span>
-                </label>
-                <span>Auto-refresh</span>
+    <div class="layout">
+        <nav class="sidebar">
+            <div class="sidebar-logo">
+                <img src="/static/sgnticon.png" alt="SGNT" onclick="window.location.href='/'" style="cursor:pointer;width:32px">
             </div>
-            <a href="/logs?download=all" class="btn btn-blue">Download all</a>
-            <button class="theme-toggle" onclick="toggleTheme()" id="theme-btn">🌙</button>
+            <a href="/dashboard" class="nav-item">Dashboard</a>
+            <a href="/logs" class="nav-item active">Logs</a>
+            <a href="/history" class="nav-item">History</a>
+            <a href="/metrics" class="nav-item">Metrics</a>
+        </nav>
+
+        <div class="main">
+            <div class="topbar">
+                <div class="topbar-left">
+                </div>
+                <div class="topbar-right">
+                    <div class="refresh-toggle">
+                        <label class="toggle">
+                            <input type="checkbox" id="auto-refresh" onchange="toggleRefresh(this.checked)">
+                            <span class="slider"></span>
+                        </label>
+                        <span>Auto-refresh</span>
+                    </div>
+                    <a href="/logs?download=all" class="btn btn-blue">Download all</a>
+                    <button class="btn btn-danger" onclick="doLogout()">Logout</button>
+                    <button class="theme-toggle" onclick="toggleTheme()" id="theme-btn">🌙</button>
+                </div>
+            </div>
+
+            <div class="content">
+                <div class="section-label">Live preview — last 250 lines</div>
+                <pre id="log-preview">{% for line in preview %}<span class="{{ line | log_class }}">{{ line }}</span>{% endfor %}</pre>
+
+                <div class="section-label">Log files</div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>File</th>
+                            <th>Size</th>
+                            <th>Modified</th>
+                            <th>Download</th>
+                            <th>Filter</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    {% for log in logs %}
+                    <tr>
+                        <td class="td-name">{{ log.display }}</td>
+                        <td class="td-muted">{{ log.size }}</td>
+                        <td class="td-muted">{{ log.modified }}</td>
+                        <td><a href="/logs?file={{ log.name }}" class="btn">Download</a></td>
+                        <td>
+                            <div class="btn-group">
+                                <a href="/logs?file={{ log.name }}&level=INFO"><button class="filter-btn f-info">INFO</button></a>
+                                <a href="/logs?file={{ log.name }}&level=WARNING"><button class="filter-btn f-warning">WARN</button></a>
+                                <a href="/logs?file={{ log.name }}&level=ERROR"><button class="filter-btn f-error">ERROR</button></a>
+                                <a href="/logs?file={{ log.name }}&level=ADMIN"><button class="filter-btn f-admin">ADMIN</button></a>
+                                <a href="/logs?file={{ log.name }}&level=DATE"><button class="filter-btn f-date">DATE</button></a>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
         </div>
     </div>
-
-    <div class="section-label">Live preview — last 250 lines</div>
-    <pre id="log-preview">{% for line in preview %}<span class="{{ line | log_class }}">{{ line }}</span>{% endfor %}</pre>
-
-    <div class="section-label">Log files</div>
-    <table>
-        <thead>
-            <tr>
-                <th>File</th>
-                <th>Size</th>
-                <th>Modified</th>
-                <th>Download</th>
-                <th>Filter</th>
-            </tr>
-        </thead>
-        <tbody>
-        {% for log in logs %}
-        <tr>
-            <td class="td-name">{{ log.display }}</td>
-            <td class="td-muted">{{ log.size }}</td>
-            <td class="td-muted">{{ log.modified }}</td>
-            <td><a href="/logs?file={{ log.name }}" class="btn">Download</a></td>
-            <td>
-                <div class="btn-group">
-                    <a href="/logs?file={{ log.name }}&level=INFO"><button class="filter-btn f-info">INFO</button></a>
-                    <a href="/logs?file={{ log.name }}&level=WARNING"><button class="filter-btn f-warning">WARN</button></a>
-                    <a href="/logs?file={{ log.name }}&level=ERROR"><button class="filter-btn f-error">ERROR</button></a>
-                    <a href="/logs?file={{ log.name }}&level=ADMIN"><button class="filter-btn f-admin">ADMIN</button></a>
-                    <a href="/logs?file={{ log.name }}&level=DATE"><button class="filter-btn f-date">DATE</button></a>
-                </div>
-            </td>
-        </tr>
-        {% endfor %}
-        </tbody>
-    </table>
 
     <script>
         let refreshInterval = null;
 
         function toggleRefresh(enabled) {
-            if (enabled) {
-                refreshInterval = setInterval(fetchLogs, 10000);
-            } else {
-                clearInterval(refreshInterval);
-                refreshInterval = null;
-            }
+            if (enabled) refreshInterval = setInterval(fetchLogs, 10000);
+            else { clearInterval(refreshInterval); refreshInterval = null; }
         }
 
         async function fetchLogs() {
@@ -2984,13 +3159,310 @@ def logs():
             document.body.classList.add('light');
             document.getElementById('theme-btn').textContent = '☀️';
         }
+
+        async function doLogout() {
+            try { await fetch('/logout'); } catch(e) {}
+            window.location.href = '/login';
+        }
+
     </script>
 
     </body>
     </html>
     """
-
     return render_template_string(html, logs=log_files, preview=latest_logs)
+
+
+@app.route("/history", methods=["GET"])
+def history():
+    if not is_admin_authenticated():
+        return handle_unauthorized()
+
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta name="description" content="SGNT — Automated margin trading system.">
+        <title>SGNT • History</title>
+        <link rel="icon" type="image/png" href="/static/sgnticon.png">
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
+        <style>
+            *{box-sizing:border-box;margin:0;padding:0}
+            body{background:#0f172a;color:#e2e8f0;font-family:'Inter',sans-serif;font-size:14px;transition:background 0.2s,color 0.2s}
+            body.light{background:#f8fafc;color:#0f172a}
+            .layout{display:flex;min-height:100vh}
+            .sidebar{width:160px;min-width:160px;background:#0a1120;border-right:0.5px solid #1e293b;display:flex;flex-direction:column;padding:16px 0;position:fixed;top:0;left:0;height:100vh;z-index:50}
+            body.light .sidebar{background:#f1f5f9;border-right-color:#e2e8f0}
+            .main{margin-left:160px;display:flex;flex-direction:column;flex:1;min-height:100vh}
+            .topbar{position:fixed;top:0;left:160px;right:0;z-index:40;display:flex;justify-content:space-between;align-items:center;padding:0 20px;height:48px;background:#0f172a;border-bottom:0.5px solid #1e293b}
+            body.light .topbar{background:#f8fafc;border-bottom-color:#e2e8f0}
+            .content{padding:20px;margin-top:48px}
+            .sidebar-logo{display:flex;align-items:center;justify-content:center;padding:0 16px 16px;border-bottom:0.5px solid #1e293b;margin-bottom:8px}
+            body.light .sidebar-logo{border-bottom-color:#e2e8f0}
+            .nav-item{display:flex;align-items:center;gap:8px;padding:8px 16px;font-size:11px;letter-spacing:0.06em;text-transform:uppercase;color:#475569;text-decoration:none;cursor:pointer;transition:0.15s;border-left:2px solid transparent;font-family:'Courier New',monospace}
+            .nav-item:hover{color:#94a3b8;background:rgba(255,255,255,0.03)}
+            body.light .nav-item:hover{background:rgba(0,0,0,0.04)}
+            .nav-item.active{color:#f1f5f9;border-left-color:#1D9E75;background:rgba(29,158,117,0.08)}
+            body.light .nav-item.active{color:#0f172a;border-left-color:#1D9E75;background:rgba(29,158,117,0.1)}
+            body.light .nav-item{color:#64748b}
+            .topbar-left{display:flex;align-items:center;gap:10px}
+            .topbar-right{display:flex;align-items:center;gap:8px}
+            .topbar-title{font-size:13px;font-weight:500;color:#f1f5f9}
+            body.light .topbar-title{color:#0f172a}
+            .theme-toggle{background:none;border:0.5px solid #334155;border-radius:20px;padding:4px 10px;cursor:pointer;font-size:13px;color:#94a3b8;transition:0.15s}
+            body.light .theme-toggle{border-color:#cbd5e1;color:#64748b}
+            .theme-toggle:hover{background:#1e293b}
+            body.light .theme-toggle:hover{background:#e2e8f0}
+            .btn{padding:5px 12px;font-size:11px;border:0.5px solid #334155;border-radius:6px;background:#0f172a;color:#94a3b8;cursor:pointer;white-space:nowrap;transition:0.15s;text-decoration:none;display:inline-block}
+            body.light .btn{background:#f8fafc;border-color:#cbd5e1;color:#64748b}
+            .btn:hover{background:#1e293b;color:#f1f5f9}
+            body.light .btn:hover{background:#e2e8f0;color:#0f172a}
+            .btn-danger{border-color:#7f1d1d;color:#fca5a5}
+            .btn-danger:hover{background:#450a0a}
+            .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px}
+            .stat{background:#1e293b;border:0.5px solid #334155;border-radius:8px;padding:10px 14px}
+            body.light .stat{background:#ffffff;border-color:#e2e8f0}
+            .stat-val{font-size:18px;font-weight:500;color:#f1f5f9;font-family:'Courier New',monospace}
+            body.light .stat-val{color:#0f172a}
+            .stat-label{font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:0.06em;margin-top:2px}
+            .filters{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;align-items:center}
+            .filter-label{font-size:11px;color:#475569;font-family:'Courier New',monospace;letter-spacing:0.04em}
+            .filters select,.filters input[type=text]{padding:5px 10px;font-size:11px;background:#1e293b;border:0.5px solid #334155;border-radius:6px;color:#94a3b8;font-family:'Courier New',monospace;outline:none;transition:0.15s}
+            body.light .filters select,body.light .filters input[type=text]{background:#ffffff;border-color:#cbd5e1;color:#64748b}
+            .filters select:focus,.filters input[type=text]:focus{border-color:#64748b;color:#f1f5f9}
+            .table-wrap{background:#1e293b;border:0.5px solid #334155;border-radius:8px;overflow:hidden}
+            body.light .table-wrap{background:#ffffff;border-color:#e2e8f0}
+            table{width:100%;border-collapse:collapse}
+            thead tr{border-bottom:0.5px solid #334155}
+            body.light thead tr{border-bottom-color:#e2e8f0}
+            th{font-size:10px;letter-spacing:0.06em;color:#475569;text-transform:uppercase;padding:10px 14px;text-align:left;font-weight:400;cursor:pointer;user-select:none;white-space:nowrap}
+            th:hover{color:#94a3b8}
+            th.active{color:#f1f5f9}
+            body.light th.active{color:#0f172a}
+            td{padding:10px 14px;font-size:12px;border-bottom:0.5px solid #1e293b;vertical-align:middle;font-family:'Courier New',monospace}
+            body.light td{border-bottom-color:#e2e8f0}
+            tr:last-child td{border-bottom:none}
+            tr:hover td{background:rgba(255,255,255,0.02)}
+            body.light tr:hover td{background:#f8fafc}
+            .badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:500;letter-spacing:0.04em}
+            .badge-long{background:rgba(29,158,117,0.15);color:#4ade80;border:0.5px solid rgba(29,158,117,0.3)}
+            .badge-short{background:rgba(226,75,74,0.15);color:#f87171;border:0.5px solid rgba(226,75,74,0.3)}
+            .empty{text-align:center;padding:40px;color:#475569;font-size:13px;font-family:'Courier New',monospace}
+            .pagination{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-top:0.5px solid #334155;font-size:11px;color:#475569;font-family:'Courier New',monospace}
+            body.light .pagination{border-top-color:#e2e8f0}
+            .pg-btns{display:flex;gap:6px}
+            @media(max-width:600px){.sidebar{display:none}.main{margin-left:0}.topbar{left:0}.stats{grid-template-columns:1fr 1fr}.filters{flex-direction:column;align-items:flex-start}}
+        </style>
+    </head>
+    <body>
+
+    <div class="layout">
+        <nav class="sidebar">
+            <div class="sidebar-logo">
+                <img src="/static/sgnticon.png" alt="SGNT" onclick="window.location.href='/'" style="cursor:pointer;width:32px">
+            </div>
+            <a href="/dashboard" class="nav-item">Dashboard</a>
+            <a href="/logs" class="nav-item">Logs</a>
+            <a href="/history" class="nav-item active">History</a>
+            <a href="/metrics" class="nav-item">Metrics</a>
+        </nav>
+
+        <div class="main">
+            <div class="topbar">
+                <div class="topbar-left">
+                </div>
+                <div class="topbar-right">
+                    <span id="count-badge" style="font-size:11px;color:#475569;font-family:'Courier New',monospace"></span>
+                    <button class="btn" id="export-btn">Export CSV</button>
+                    <button class="btn btn-danger" onclick="doLogout()">Logout</button>
+                    <button class="theme-toggle" onclick="toggleTheme()" id="theme-btn">🌙</button>
+                </div>
+            </div>
+
+            <div class="content">
+                <div class="stats">
+                    <div class="stat"><div class="stat-val" id="s-total">—</div><div class="stat-label">Total trades</div></div>
+                    <div class="stat"><div class="stat-val" id="s-longs" style="color:#4ade80">—</div><div class="stat-label">Longs</div></div>
+                    <div class="stat"><div class="stat-val" id="s-shorts" style="color:#f87171">—</div><div class="stat-label">Shorts</div></div>
+                    <div class="stat"><div class="stat-val" id="s-volume">—</div><div class="stat-label">Volume USDC</div></div>
+                </div>
+
+                <div class="filters">
+                    <span class="filter-label">Filter</span>
+                    <input type="text" id="f-symbol" placeholder="Symbol" style="width:110px">
+                    <select id="f-side">
+                        <option value="">All sides</option>
+                        <option value="Long">Long</option>
+                        <option value="Short">Short</option>
+                    </select>
+                    <select id="f-strategy">
+                        <option value="">All strategies</option>
+                    </select>
+                    <span class="filter-label" style="margin-left:8px">Sort</span>
+                    <select id="f-sort">
+                        <option value="tradeId-desc">ID ↓</option>
+                        <option value="tradeId-asc">ID ↑</option>
+                        <option value="time-desc">Time ↓</option>
+                        <option value="time-asc">Time ↑</option>
+                        <option value="spent_qty-desc">Volume ↓</option>
+                        <option value="spent_qty-asc">Volume ↑</option>
+                        <option value="executed_qty-desc">Qty ↓</option>
+                        <option value="executed_qty-asc">Qty ↑</option>
+                    </select>
+                    <button class="btn" id="clear-btn" style="margin-left:4px">Clear</button>
+                </div>
+
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th data-col="tradeId">ID <span class="sort-arrow">↕</span></th>
+                                <th data-col="time">Time <span class="sort-arrow">↕</span></th>
+                                <th data-col="symbol">Symbol <span class="sort-arrow">↕</span></th>
+                                <th data-col="side">Side <span class="sort-arrow">↕</span></th>
+                                <th data-col="executed_qty">Qty <span class="sort-arrow">↕</span></th>
+                                <th data-col="spent_qty">Volume <span class="sort-arrow">↕</span></th>
+                                <th data-col="strategy">Strategy <span class="sort-arrow">↕</span></th>
+                            </tr>
+                        </thead>
+                        <tbody id="tbody"></tbody>
+                    </table>
+                    <div class="pagination">
+                        <span id="pg-info"></span>
+                        <div class="pg-btns">
+                            <button class="btn" id="pg-prev">← Prev</button>
+                            <button class="btn" id="pg-next">Next →</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const RAW = {{ trade_history | tojson }};
+        const PAGE_SIZE = 25;
+        let page = 1;
+        let filtered = [...RAW];
+
+        function toggleTheme() {
+            const light = document.body.classList.toggle('light');
+            document.getElementById('theme-btn').textContent = light ? '☀️' : '🌙';
+            localStorage.setItem('sgnt-theme', light ? 'light' : 'dark');
+        }
+
+        if (localStorage.getItem('sgnt-theme') === 'light') {
+            document.body.classList.add('light');
+            document.getElementById('theme-btn').textContent = '☀️';
+        }
+
+        const strats = [...new Set(RAW.map(t => t.strategy).filter(Boolean))];
+        const sel = document.getElementById('f-strategy');
+        strats.forEach(s => { const o = document.createElement('option'); o.value = s; o.textContent = s; sel.appendChild(o); });
+
+        function applyFilters() {
+            const sym = document.getElementById('f-symbol').value.toUpperCase().trim();
+            const side = document.getElementById('f-side').value;
+            const strat = document.getElementById('f-strategy').value;
+            const [col, dir] = document.getElementById('f-sort').value.split('-');
+            let data = [...RAW];
+            if (sym) data = data.filter(t => t.symbol && t.symbol.includes(sym));
+            if (side) data = data.filter(t => t.side === side);
+            if (strat) data = data.filter(t => t.strategy === strat);
+            data.sort((a, b) => {
+                let va = a[col], vb = b[col];
+                if (!isNaN(+va) && !isNaN(+vb)) { va = +va; vb = +vb; }
+                else { va = String(va || ''); vb = String(vb || ''); }
+                return dir === 'asc' ? (va > vb ? 1 : va < vb ? -1 : 0) : (va < vb ? 1 : va > vb ? -1 : 0);
+            });
+            filtered = data;
+            page = 1;
+            render();
+        }
+
+        function render() {
+            const total = filtered.length;
+            const start = (page - 1) * PAGE_SIZE;
+            const slice = filtered.slice(start, start + PAGE_SIZE);
+            const tbody = document.getElementById('tbody');
+            if (slice.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7"><div class="empty">No trades found</div></td></tr>';
+            } else {
+                tbody.innerHTML = slice.map(t => `<tr>
+                    <td style="color:#64748b">#${t.tradeId || '—'}</td>
+                    <td style="color:#64748b;font-size:11px">${t.time || '—'}</td>
+                    <td style="color:#f1f5f9">${t.symbol || '—'}</td>
+                    <td><span class="badge badge-${(t.side || '').toLowerCase()}">${t.side || '—'}</span></td>
+                    <td>${t.executed_qty != null ? parseFloat(t.executed_qty).toFixed(5) : '—'}</td>
+                    <td style="color:#94a3b8">${t.spent_qty != null ? parseFloat(t.spent_qty).toFixed(2) + ' $' : '—'}</td>
+                    <td style="color:#64748b">${t.strategy || '—'}</td>
+                </tr>`).join('');
+            }
+            document.getElementById('pg-info').textContent = total === 0 ? '0 results' : `${start + 1}–${Math.min(start + PAGE_SIZE, total)} of ${total}`;
+            document.getElementById('pg-prev').style.opacity = page === 1 ? '0.4' : '1';
+            document.getElementById('pg-next').style.opacity = page >= Math.ceil(total / PAGE_SIZE) ? '0.4' : '1';
+            document.getElementById('count-badge').textContent = `${RAW.length} trades`;
+            const longs = RAW.filter(t => t.side === 'Long').length;
+            const shorts = RAW.filter(t => t.side === 'Short').length;
+            const vol = RAW.reduce((s, t) => s + (parseFloat(t.spent_qty) || 0), 0);
+            document.getElementById('s-total').textContent = RAW.length;
+            document.getElementById('s-longs').textContent = longs;
+            document.getElementById('s-shorts').textContent = shorts;
+            document.getElementById('s-volume').textContent = vol.toFixed(2);
+            const [activeCol] = document.getElementById('f-sort').value.split('-');
+            document.querySelectorAll('th[data-col]').forEach(th => th.classList.toggle('active', th.dataset.col === activeCol));
+        }
+
+        ['f-symbol', 'f-side', 'f-strategy', 'f-sort'].forEach(id => {
+            document.getElementById(id).addEventListener('input', applyFilters);
+            document.getElementById(id).addEventListener('change', applyFilters);
+        });
+
+        document.getElementById('clear-btn').addEventListener('click', () => {
+            document.getElementById('f-symbol').value = '';
+            document.getElementById('f-side').value = '';
+            document.getElementById('f-strategy').value = '';
+            document.getElementById('f-sort').value = 'tradeId-desc';
+            applyFilters();
+        });
+
+        document.getElementById('pg-prev').addEventListener('click', () => { if (page > 1) { page--; render(); } });
+        document.getElementById('pg-next').addEventListener('click', () => { if (page < Math.ceil(filtered.length / PAGE_SIZE)) { page++; render(); } });
+
+        document.querySelectorAll('th[data-col]').forEach(th => {
+            th.addEventListener('click', () => {
+                const col = th.dataset.col;
+                const sel = document.getElementById('f-sort');
+                const [cur, dir] = sel.value.split('-');
+                sel.value = col === cur && dir === 'desc' ? col + '-asc' : col + '-desc';
+                applyFilters();
+            });
+        });
+
+        document.getElementById('export-btn').addEventListener('click', () => {
+            const headers = ['ID', 'Time', 'Symbol', 'Side', 'Qty', 'Volume', 'Strategy'];
+            const rows = filtered.map(t => [t.tradeId, t.time, t.symbol, t.side, t.executed_qty, t.spent_qty, t.strategy]);
+            const csv = [headers, ...rows].map(r => r.join(',')).join('\\n');
+            const a = document.createElement('a');
+            a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+            a.download = 'sgnt_history.csv';
+            a.click();
+        });
+
+        applyFilters();
+
+    async function doLogout() {
+        try { await fetch('/logout'); } catch(e) {}
+        window.location.href = '/login';
+    }
+
+    </script>
+
+    </body>
+    </html>
+    """
+    return render_template_string(html, trade_history=TRADE_HISTORY)
 
 
 @app.route("/metrics")
@@ -2998,105 +3470,150 @@ def metrics():
     if not is_admin_authenticated():
         return handle_unauthorized()
 
+    sidebar_html = """
+    <div class="layout">
+        <nav class="sidebar">
+            <div class="sidebar-logo">
+                <img src="/static/sgnticon.png" alt="SGNT" onclick="window.location.href='/'" style="cursor:pointer;width:32px">
+            </div>
+            <a href="/dashboard" class="nav-item">Dashboard</a>
+            <a href="/logs" class="nav-item">Logs</a>
+            <a href="/history" class="nav-item">History</a>
+            <a href="/metrics" class="nav-item active">Metrics</a>
+        </nav>
+        <div class="main">
+            <div class="topbar">
+                <div class="topbar-left">
+                </div>
+                <div class="topbar-right">
+                    <span class="snapshot-count">{count} snapshots</span>
+                    <button class="btn btn-danger" onclick="doLogout()">Logout</button>
+                    <button class="theme-toggle" onclick="toggleTheme()" id="theme-btn">🌙</button>
+                </div>
+            </div>
+            <div class="content">
+    """.format(count=len(SNAPSHOT_HISTORY))
+
+    shared_css = """
+        *{box-sizing:border-box;margin:0;padding:0}
+        body{background:#0f172a;color:#e2e8f0;font-family:'Inter',sans-serif;font-size:14px;transition:background 0.2s,color 0.2s}
+        body.light{background:#f8fafc;color:#0f172a}
+        .layout{display:flex;min-height:100vh}
+        .sidebar{width:160px;min-width:160px;background:#0a1120;border-right:0.5px solid #1e293b;display:flex;flex-direction:column;padding:16px 0;position:fixed;top:0;left:0;height:100vh;z-index:50}
+        body.light .sidebar{background:#f1f5f9;border-right-color:#e2e8f0}
+        .main{margin-left:160px;display:flex;flex-direction:column;flex:1;min-height:100vh}
+        .topbar{position:fixed;top:0;left:160px;right:0;z-index:40;display:flex;justify-content:space-between;align-items:center;padding:0 20px;height:48px;background:#0f172a;border-bottom:0.5px solid #1e293b}
+        body.light .topbar{background:#f8fafc;border-bottom-color:#e2e8f0}
+        .content{padding:20px;margin-top:48px}
+        .sidebar-logo{display:flex;align-items:center;justify-content:center;padding:0 16px 16px;border-bottom:0.5px solid #1e293b;margin-bottom:8px}
+        body.light .sidebar-logo{border-bottom-color:#e2e8f0}
+        .nav-item{display:flex;align-items:center;gap:8px;padding:8px 16px;font-size:11px;letter-spacing:0.06em;text-transform:uppercase;color:#475569;text-decoration:none;cursor:pointer;transition:0.15s;border-left:2px solid transparent;font-family:'Courier New',monospace}
+        .nav-item:hover{color:#94a3b8;background:rgba(255,255,255,0.03)}
+        body.light .nav-item:hover{background:rgba(0,0,0,0.04)}
+        .nav-item.active{color:#f1f5f9;border-left-color:#1D9E75;background:rgba(29,158,117,0.08)}
+        body.light .nav-item.active{color:#0f172a;border-left-color:#1D9E75;background:rgba(29,158,117,0.1)}
+        body.light .nav-item{color:#64748b}
+        .topbar-left{display:flex;align-items:center;gap:10px}
+        .topbar-right{display:flex;align-items:center;gap:8px}
+        .topbar-title{font-size:13px;font-weight:500;color:#f1f5f9}
+        body.light .topbar-title{color:#0f172a}
+        .btn{padding:5px 12px;font-size:11px;border:0.5px solid #334155;border-radius:6px;background:#0f172a;color:#94a3b8;cursor:pointer;white-space:nowrap;transition:0.15s}
+        body.light .btn{background:#f8fafc;border-color:#cbd5e1;color:#64748b}
+        .btn:hover{background:#1e293b;color:#f1f5f9}
+        body.light .btn:hover{background:#e2e8f0;color:#0f172a}
+        .btn-danger{border-color:#7f1d1d;color:#fca5a5}
+        .btn-danger:hover{background:#450a0a}
+        .theme-toggle{background:none;border:0.5px solid #334155;border-radius:20px;padding:4px 10px;cursor:pointer;font-size:13px;color:#94a3b8;transition:0.15s}
+        body.light .theme-toggle{border-color:#cbd5e1;color:#64748b}
+        .theme-toggle:hover{background:#1e293b}
+        body.light .theme-toggle:hover{background:#e2e8f0}
+        .snapshot-count{font-size:11px;color:#475569;font-family:'Courier New',monospace}
+        @media(max-width:600px){.sidebar{display:none}.main{margin-left:0}.topbar{left:0}}
+    """
+
     if not SNAPSHOT_HISTORY:
-        return """
-        <!DOCTYPE html>
+        return f"""<!DOCTYPE html>
         <html>
         <head>
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <meta name="description" content="SGNT — Automated margin trading system for Binance Cross Margin.">
-            <title>SGNT Metrics</title>
+            <title>SGNT • Metrics</title>
             <link rel="icon" type="image/png" href="/static/sgnticon.png">
-            <style>
-                *{box-sizing:border-box;margin:0;padding:0}
-                body{background:#0f172a;color:#94a3b8;font-family:'Inter',sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;margin:0;font-size:13px}
-                img{width:120px;opacity:0.3;margin-bottom:20px}
-                p{font-family:'Courier New',monospace;letter-spacing:0.06em}
+            <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
+            <style>{shared_css}
+                .empty-state{{display:flex;flex-direction:column;align-items:center;justify-content:center;height:calc(100vh - 48px);color:#475569}}
+                .empty-state img{{width:80px;opacity:0.2;margin-bottom:16px}}
+                .empty-state p{{font-family:'Courier New',monospace;font-size:13px;letter-spacing:0.06em}}
             </style>
         </head>
         <body>
-            <img src="/static/sgntlogo.png" alt="SGNT">
-            <p>No snapshot data yet.</p>
-        </body>
-        </html>
-        """
+        {sidebar_html}
+            <div class="empty-state">
+                <img src="/static/sgntlogo.png" alt="SGNT">
+                <p>No snapshot data yet.</p>
+            </div>
+            </div>
+        </div>
+        </div>
+        <script>
+            function toggleTheme(){{const light=document.body.classList.toggle('light');document.getElementById('theme-btn').textContent=light?'☀️':'🌙';localStorage.setItem('sgnt-theme',light?'light':'dark');}}
+            if(localStorage.getItem('sgnt-theme')==='light'){{document.body.classList.add('light');document.getElementById('theme-btn').textContent='☀️';}}
+            async function doLogout(){{try{{await fetch('/logout');}}catch(e){{}}window.location.href='/login';}}
+        </script>
+        </body></html>"""
 
     return f"""
     <!DOCTYPE html>
     <html>
     <head>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <meta name="description" content="SGNT — Automated margin trading system for Binance Cross Margin.">
-        <title>SGNT Metrics</title>
+        <meta name="description" content="SGNT — Automated margin trading system.">
+        <title>SGNT • Metrics</title>
         <link rel="icon" type="image/png" href="/static/sgnticon.png">
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
         <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
         <style>
-            *{{box-sizing:border-box;margin:0;padding:0}}
-            body{{background:#0f172a;color:#e2e8f0;font-family:'Inter',sans-serif;padding:20px;font-size:14px;transition:background 0.2s,color 0.2s}}
-            body.light{{background:#f8fafc;color:#0f172a}}
-            .topbar{{display:flex;justify-content:space-between;align-items:center;padding:0 0 14px;border-bottom:0.5px solid #1e293b;margin-bottom:16px}}
-            body.light .topbar{{border-bottom-color:#e2e8f0}}
-            .topbar-left{{display:flex;align-items:center;gap:12px}}
-            .topbar-right{{display:flex;align-items:center;gap:8px}}
-            .topbar-title{{font-size:13px;font-weight:500;color:#f1f5f9}}
-            body.light .topbar-title{{color:#0f172a}}
-            .logo{{height:22px;opacity:0.85;display:block}}
-            .btn{{padding:5px 12px;font-size:11px;border:0.5px solid #334155;border-radius:6px;background:#0f172a;color:#94a3b8;cursor:pointer;white-space:nowrap;transition:0.15s;text-decoration:none;display:inline-block}}
-            body.light .btn{{background:#f8fafc;border-color:#cbd5e1;color:#64748b}}
-            .btn:hover{{background:#1e293b;color:#f1f5f9}}
-            body.light .btn:hover{{background:#e2e8f0;color:#0f172a}}
-            .theme-toggle{{background:none;border:0.5px solid #334155;border-radius:20px;padding:4px 10px;cursor:pointer;font-size:13px;color:#94a3b8;transition:0.15s}}
-            body.light .theme-toggle{{border-color:#cbd5e1;color:#64748b}}
-            .theme-toggle:hover{{background:#1e293b}}
-            body.light .theme-toggle:hover{{background:#e2e8f0}}
-            .chart-card{{background:#1e293b;border:0.5px solid #334155;border-radius:8px;padding:16px;margin-bottom:12px}}
-            body.light .chart-card{{background:#ffffff;border-color:#e2e8f0}}
-            .chart-header{{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}}
-            .chart-title{{font-size:11px;letter-spacing:0.06em;color:#64748b;text-transform:uppercase}}
-            .dl-btn{{padding:3px 10px;font-size:10px;border:0.5px solid #334155;border-radius:4px;background:transparent;color:#64748b;cursor:pointer}}
-            body.light .dl-btn{{border-color:#cbd5e1}}
-            .dl-btn:hover{{background:#0f172a;color:#94a3b8}}
-            body.light .dl-btn:hover{{background:#e2e8f0;color:#0f172a}}
-            .snapshot-count{{font-size:11px;color:#475569;font-family:'Courier New',monospace}}
+        {shared_css}
+        .chart-card{{background:#1e293b;border:0.5px solid #334155;border-radius:8px;padding:16px;margin-bottom:12px}}
+        body.light .chart-card{{background:#ffffff;border-color:#e2e8f0}}
+        .chart-header{{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}}
+        .chart-title{{font-size:11px;letter-spacing:0.06em;color:#64748b;text-transform:uppercase}}
+        .dl-btn{{padding:3px 10px;font-size:10px;border:0.5px solid #334155;border-radius:4px;background:transparent;color:#64748b;cursor:pointer}}
+        body.light .dl-btn{{border-color:#cbd5e1}}
+        .dl-btn:hover{{background:#0f172a;color:#94a3b8}}
+        body.light .dl-btn:hover{{background:#e2e8f0;color:#0f172a}}
+        .btn-danger{{border-color:#7f1d1d;color:#fca5a5}}
+        .btn-danger:hover{{background:#450a0a}}
         </style>
     </head>
     <body>
 
-    <div class="topbar">
-        <div class="topbar-left">
-            <a href="/dashboard" class="btn">← Dashboard</a>
-            <img src="/static/sgnticon.png" class="icon" alt="SGNT" onclick="window.location.href='/'" style="cursor: pointer; width: 25px;">
-        </div>
-        <div class="topbar-right">
-            <span class="snapshot-count">{len(SNAPSHOT_HISTORY)} snapshots</span>
-            <button class="theme-toggle" onclick="toggleTheme()" id="theme-btn">🌙</button>
-        </div>
-    </div>
+    {sidebar_html}
 
-    <div class="chart-card">
-        <div class="chart-header">
-            <span class="chart-title">Balance</span>
-            <button class="dl-btn" onclick="downloadChart('balanceChart')">Download</button>
+        <div class="chart-card">
+            <div class="chart-header">
+                <span class="chart-title">Balance</span>
+                <button class="dl-btn" onclick="downloadChart('balanceChart')">Download</button>
+            </div>
+            <canvas id="balanceChart"></canvas>
         </div>
-        <canvas id="balanceChart"></canvas>
-    </div>
 
-    <div class="chart-card">
-        <div class="chart-header">
-            <span class="chart-title">Margin level</span>
-            <button class="dl-btn" onclick="downloadChart('marginChart')">Download</button>
+        <div class="chart-card">
+            <div class="chart-header">
+                <span class="chart-title">Margin level</span>
+                <button class="dl-btn" onclick="downloadChart('marginChart')">Download</button>
+            </div>
+            <canvas id="marginChart"></canvas>
         </div>
-        <canvas id="marginChart"></canvas>
-    </div>
 
-    <div class="chart-card">
-        <div class="chart-header">
-            <span class="chart-title">Activity</span>
-            <button class="dl-btn" onclick="downloadChart('activityChart')">Download</button>
+        <div class="chart-card">
+            <div class="chart-header">
+                <span class="chart-title">Activity</span>
+                <button class="dl-btn" onclick="downloadChart('activityChart')">Download</button>
+            </div>
+            <canvas id="activityChart"></canvas>
         </div>
-        <canvas id="activityChart"></canvas>
-    </div>
+
+    </div></div></div>
 
     <script>
     const data = {json.dumps(SNAPSHOT_HISTORY)};
@@ -3117,16 +3634,7 @@ def metrics():
     Chart.defaults.borderColor = gridColor();
 
     function dataset(label, key, color) {{
-        return {{
-            label,
-            data: data.map(d => d[key]),
-            borderColor: color,
-            backgroundColor: color + '18',
-            tension: 0.3,
-            pointRadius: 2,
-            pointHoverRadius: 4,
-            fill: false
-        }};
+        return {{ label, data: data.map(d => d[key]), borderColor: color, backgroundColor: color + '18', tension: 0.3, pointRadius: 2, pointHoverRadius: 4, fill: false }};
     }}
 
     function downloadChart(chartId) {{
@@ -3172,22 +3680,14 @@ def metrics():
         beforeDraw: (chart) => {{
             const {{ ctx, chartArea, scales: {{ y }} }} = chart;
             if (!chartArea) return;
-
             const drawZone = (yMin, yMax, color) => {{
                 const yTop = y.getPixelForValue(transform(yMax));
                 const yBottom = y.getPixelForValue(transform(yMin));
-
                 ctx.save();
                 ctx.fillStyle = color;
-                ctx.fillRect(
-                    chartArea.left,
-                    yTop,
-                    chartArea.right - chartArea.left,
-                    yBottom - yTop
-                );
+                ctx.fillRect(chartArea.left, yTop, chartArea.right - chartArea.left, yBottom - yTop);
                 ctx.restore();
             }};
-
             drawZone(1.25, 2, 'rgba(255, 255, 0, 0.2)');
             drawZone(1.16, 1.25, 'rgba(255, 165, 0, 0.25)');
             drawZone(1.1, 1.16, 'rgba(255, 0, 0, 0.25)');
@@ -3196,43 +3696,18 @@ def metrics():
 
     const marginData = data.map((d, i) => {{
         const v = d.marginLevel;
-        if (i > 0) {{
-            const prev = data[i-1].marginLevel;
-            if (Math.abs(v - prev) > 100) return null;
-        }}
+        if (i > 0) {{ const prev = data[i-1].marginLevel; if (Math.abs(v - prev) > 100) return null; }}
         return transform(v);
     }});
 
     new Chart(document.getElementById('marginChart'), {{
         type: 'line',
-        data: {{
-            labels,
-            datasets: [{{
-                label: "Margin Level",
-                data: marginData,
-                borderColor: "#a78bfa",
-                backgroundColor: "#a78bfa18",
-                tension: 0.3,
-                pointRadius: 2,
-                pointHoverRadius: 4,
-                fill: false,
-                spanGaps: false
-            }}]
-        }},
+        data: {{ labels, datasets: [{{ label: "Margin Level", data: marginData, borderColor: "#a78bfa", backgroundColor: "#a78bfa18", tension: 0.3, pointRadius: 2, pointHoverRadius: 4, fill: false, spanGaps: false }}] }},
         options: {{
             ...commonOptions,
             scales: {{
                 x: commonOptions.scales.x,
-                y: {{
-                    type: 'linear',
-                    min: transform(1.1),
-                    max: transform(1000),
-                    ticks: {{
-                        font: {{ size: 10 }},
-                        callback: (v) => inverse(v).toFixed(2)
-                    }},
-                    grid: {{ color: gridColor() }}
-                }}
+                y: {{ type: 'linear', min: transform(1.1), max: transform(1000), ticks: {{ font: {{ size: 10 }}, callback: (v) => inverse(v).toFixed(2) }}, grid: {{ color: gridColor() }} }}
             }}
         }},
         plugins: [backgroundZonesPlugin]
@@ -3258,23 +3733,17 @@ def metrics():
             plugins: {{legend: {{labels: {{font: {{size: 11}}, boxWidth: 12}}}}}},
             scales: {{
                 x: {{ticks: {{font: {{size: 10}}, maxTicksLimit: 8}}, grid: {{color: gridColor()}}}},
-                y: {{
-                    beginAtZero: true,
-                    stacked: SNAPSHOT_INTERVAL === 1,
-                    ticks: {{ font: {{ size: 10 }}, stepSize: 1 }},
-                    grid: {{ color: gridColor() }},
-                    title: {{ display: true, text: 'Daily', font: {{ size: 10 }}, color: '#475569' }}
-                }},
-                y1: {{
-                    beginAtZero: true,
-                    position: 'right',
-                    ticks: {{ font: {{ size: 10 }} }},
-                    grid: {{ drawOnChartArea: false }},
-                    title: {{ display: true, text: 'Total', font: {{ size: 10 }}, color: '#475569' }}
-                }}
+                y: {{ beginAtZero: true, stacked: SNAPSHOT_INTERVAL === 1, ticks: {{ font: {{ size: 10 }}, stepSize: 1 }}, grid: {{ color: gridColor() }}, title: {{ display: true, text: 'Daily', font: {{ size: 10 }}, color: '#475569' }} }},
+                y1: {{ beginAtZero: true, position: 'right', ticks: {{ font: {{ size: 10 }} }}, grid: {{ drawOnChartArea: false }}, title: {{ display: true, text: 'Total', font: {{ size: 10 }}, color: '#475569' }} }}
             }}
         }}
     }});
+
+        async function doLogout() {{
+            try {{ await fetch('/logout'); }} catch(e) {{}}
+            window.location.href = '/login';
+        }}
+
     </script>
 
     </body>
