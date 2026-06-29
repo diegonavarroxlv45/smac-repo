@@ -45,7 +45,6 @@ DFT_TRADING = True
 DFT_SL_OVERRIDE = True
 DFT_TP_OVERRIDE = True
 DFT_LOG_DEBUG = False
-DFT_PLATFORM = "Binance"
 DFT_SL_PCT = 2.0
 DFT_TP_PCT = 4.0
 DFT_LOGIN_LIMIT  = 5
@@ -109,8 +108,10 @@ DFT_RISK_PCT = max(0.1, min(DFT_RISK_PCT, MAX_RISK_PCT))     # %
 # --- SL/TP COMISSION ---
 COMMISSION = Decimal(os.getenv("COMMISSION", "0.1"))         # %
 
+# --- HISTORY VARIABLES ---
+MAX_HISTORY = int(os.getenv("MAX_HISTORY", "100000"))        # NUMBER
+
 # --- SNAPSHOT VARIABLES ---
-SNAPSHOT_INTERVAL = int(os.getenv("SNAPSHOT_INTERVAL", "1")) # DAYS
 MAX_SNAPSHOTS = int(os.getenv("MAX_SNAPSHOTS", "500"))       # NUMBER
 
 # --- SECRET VARIABLES ---
@@ -186,23 +187,29 @@ if PLATFORM == "Binance":
     API_SECRET = os.getenv("BINANCE_API_SECRET")
     BASE_URL = "https://api.binance.com"
     ALGORITHM = "sha256"
+    QUOTE = "USDC"
+    SEPARATOR = ""
 
 elif PLATFORM == "Binance Testnet":
-    logger.info("🧪 Running in Binance Testnet")
     API_KEY = os.getenv("TESTNET_API_KEY")
     API_SECRET = os.getenv("TESTNET_API_SECRET")
     BASE_URL = "https://testnet.binance.vision"
     ALGORITHM = "sha256"
+    QUOTE = "USDC"
+    SEPARATOR = ""
 
-if not API_KEY:
+if not API_KEY and not API_SECRET:
+    logger.error(f"❌ Missing both {PLATFORM} API credentials")
+    raise RuntimeError(f"Missing both {PLATFORM} API credentials")
+
+elif not API_KEY:
     logger.error(f"❌ Missing {PLATFORM} API KEY credentials")
     raise RuntimeError(f"Missing {PLATFORM} API KEY credentials")
+
 elif not API_SECRET:
     logger.error(f"❌ Missing {PLATFORM} API SECRET credentials")
     raise RuntimeError(f"Missing {PLATFORM} API SECRET credentials")
-elif not API_KEY and not API_SECRET:
-    logger.error(f"❌ Missing both {PLATFORM} API credentials")
-    raise RuntimeError(f"Missing both {PLATFORM} API credentials")
+
 else:
     logger.info(f"🔐 {PLATFORM} API credentials loaded successfully")
 
@@ -229,7 +236,7 @@ LAST_HEALTH_CHECK = 0
 HEALTH_CHECK_INTERVAL = 10
 LAST_HEALTH_STATUS = False
 
-# --- PUBLIC BINANCE REQUEST ---
+# --- PUBLIC REQUEST ---
 def send_public_request(http_method: str, path: str, params=None):
     url = f"{BASE_URL}{path}"
 
@@ -244,7 +251,7 @@ def health_check():
     if not BOT_READY:
         logger.info("🩺 Running health check...")
 
-    # 📡 CHECK BINANCE CONNECTIVITY
+    # 📡 CHECK CONNECTIVITY
     try:
         send_public_request("GET", "/api/v3/time")
     except Exception as e:
@@ -253,7 +260,7 @@ def health_check():
 
     # 📡 CHECK ACCOUNT ACCESS
     try:
-        get_balance_margin("USDC")
+        get_balance_margin(QUOTE)
     except Exception as e:
         logger.error(f"❌ Account access failed: {e}")
         return False
@@ -330,7 +337,7 @@ def trading_guard():
 
 
 # ====== SIGNING AND REQUESTING ======
-"""HMAC-SHA256 request signing, retry logic with exponential backoff, and signed/unsigned request dispatchers."""
+"""Request signing, retry logic with exponential backoff, and signed/unsigned request dispatchers."""
 
 # --- ALGORITHM VALIDATION ---
 def check_algorithm(ALGORITHM):
@@ -482,11 +489,28 @@ def check_error(resp, symbol, task):
     return None
 
 
+# ====== SYMBOL BUILDING ======
+"""Returns symbol and asset structure based on the given platform quote and platform separator"""
+
+# --- BUILD SYMBOL ---
+def build_symbol(base_asset):
+    return f"{base_asset}{SEPARATOR}{QUOTE}"
+
+# --- GET BALANCE ASSET ---
+def get_base_asset(symbol):
+    suffix = f"{SEPARATOR}{QUOTE}"
+
+    if not symbol.endswith(suffix):
+        raise ValueError(f"{symbol} doesn't end with {suffix}")
+
+    return symbol[:-len(suffix)]
+
+
 # ====== BALANCE & MARKET DATA ======
 """Fetches free margin balance for a given asset and retrieves symbol lot size, tick size, and notional constraints from exchange info."""
 
 # --- BALANCE FETCHING ---
-def get_balance_margin(asset="USDC") -> float:
+def get_balance_margin(asset=QUOTE) -> float:
     q, sig = sign_params_query({"timestamp": _now_ms()}, API_SECRET)
     url = f"{BASE_URL}/sapi/v1/margin/account?{q}&signature={sig}"
     headers = {"X-MBX-APIKEY": API_KEY}
@@ -526,58 +550,6 @@ def get_symbol_lot(symbol):
 def get_margin_account():
     acc = send_signed_request("GET", "/sapi/v1/margin/account", {})
     return acc
-
-
-# ====== TRADE COUNTER ======
-"""Thread-safe trade ID generator, daily trade summary logger, and midnight reset watcher."""
-
-# --- TRADE ID ---
-def next_trade_id(side):
-    global TRADE_COUNTER, DAILY_LONGS, DAILY_SHORTS, TOTAL_LONGS, TOTAL_SHORTS
-
-    # 📊 GENERAL TRADE COUNTER
-    with TRADE_LOCK:
-        TRADE_COUNTER += 1
-
-    # 📈 TRADE COUNTER LONG
-    if side == "Long":
-        DAILY_LONGS += 1
-        TOTAL_LONGS += 1
-
-    # 📉 TRADE COUNTER SHORT
-    elif side == "Short":
-        DAILY_SHORTS +=1
-        TOTAL_SHORTS +=1
-
-    return TRADE_COUNTER
-
-# --- DAILY SUMMARY ---
-def check_daily_summary():
-    global DAILY_LONGS, DAILY_SHORTS, CURRENT_DAY
-
-    now_day = datetime.utcnow().date()
-
-    if now_day != CURRENT_DAY:
-        total_trades = DAILY_LONGS + DAILY_SHORTS
-
-        if total_trades > 0:
-            # 📅 DAY SUMMARY LOGGER
-            logger.date(f"📅 Day {CURRENT_DAY} completed!")
-            logger.date(f"Trades: {total_trades}")
-            logger.date(f"(Longs: {DAILY_LONGS} | Shorts: {DAILY_SHORTS})")
-            logger.date("_____________________________________\n")
-
-        DAILY_LONGS = 0
-        DAILY_SHORTS = 0
-        CURRENT_DAY = now_day
-
-# --- DAILY WATCHER ---
-def daily_watcher():
-    while True:
-        check_daily_summary()
-        time.sleep(60)
-
-threading.Thread(target=daily_watcher, daemon=True).start()
 
 
 # ====== PRICE ADJUST (tickSize) ======
@@ -682,11 +654,11 @@ def resolve_risk_pct(webhook_data=None):
 
 
 # ====== PRE-TRADE CLEANUP ======
-"""Before each trade: cancels open orders, repays outstanding debt, and sells residual asset balance back to USDC."""
+"""Before each trade: cancels open orders, repays outstanding debt, and sells residual asset balance back to quote."""
 
 # --- CANCEL ORDERS FROM PREVIOUS POSITIONS ---
 def cancel(symbol: str):
-    base_asset = symbol.replace("USDC", "")
+    base_asset = get_base_asset(symbol)
 
     try:
         # 🧹 ORDER CANCEL PARAMS
@@ -734,7 +706,7 @@ def cancel_all():
 
 # --- GENERAL CLEANUP FROM PREVIOUS POSITIONS ---
 def cleanup(symbol: str):
-    base_asset = symbol.replace("USDC", "")
+    base_asset = get_base_asset(symbol)
 
     try:
         lot = get_symbol_lot(symbol)
@@ -746,7 +718,7 @@ def cleanup(symbol: str):
             logger.error(f"⚠️ Cleanup aborted for {base_asset}: invalid account response: {acc_data}")
             return
         asset_data = next((a for a in acc_data["userAssets"] if a["asset"] == base_asset), None)
-        usdc_data  = next((a for a in acc_data["userAssets"] if a["asset"] == "USDC"), None)
+        quote_data  = next((a for a in acc_data["userAssets"] if a["asset"] == QUOTE), None)
 
         if not asset_data:
             logger.info(f"ℹ️ {base_asset} not present in margin account")
@@ -754,7 +726,7 @@ def cleanup(symbol: str):
 
         borrowed  = float(asset_data["borrowed"])
         free_base = float(asset_data["free"])
-        free_usdc = float(usdc_data["free"]) if usdc_data else 0.0
+        free_quote = float(quote_data["free"]) if quote_data else 0.0
         r = request_with_retries("GET", f"{BASE_URL}/api/v3/ticker/price", params={"symbol": symbol})
         price_est = float(r["price"])
 
@@ -777,8 +749,8 @@ def cleanup(symbol: str):
             if buy_qty_f > 0:
                 buy_cost = buy_qty_f * price_est
 
-                if buy_cost > free_usdc:
-                    logger.info(f"ℹ️ Not enough USDC for cleanup buy (need {buy_cost:.4f}, have {free_usdc:.4f}) — skipping buy")
+                if buy_cost > free_quote:
+                    logger.info(f"ℹ️ Not enough {QUOTE} for cleanup buy (need {buy_cost:.4f}, have {free_quote:.4f}) — skipping buy")
                 elif buy_cost < lot["minNotional"]:
                     logger.info(f"ℹ️ Cleanup buy below minNotional ({buy_cost:.4f} < {lot['minNotional']}) — skipping buy")
                 else:
@@ -895,7 +867,7 @@ def cleanup(symbol: str):
         if err:
             return err
 
-        logger.info(f"🧹 Sold residual {qty_str} {base_asset} to USDC")
+        logger.info(f"🧹 Sold residual {qty_str} {base_asset} to {QUOTE}")
 
     except Exception as e:
         logger.error(f"⚠️ Cleanup error for {base_asset}: {e}")
@@ -907,9 +879,9 @@ def cleanup(symbol: str):
 # --- MARGIN LONG ---
 def execute_long_margin(symbol, strategy, webhook_data=None):
     lot = get_symbol_lot(symbol)
-    balance_usdc = get_balance_margin("USDC")
+    balance_quote = get_balance_margin(QUOTE)
     risk_pct = resolve_risk_pct(webhook_data)
-    qty_quote = balance_usdc * risk_pct
+    qty_quote = balance_quote * risk_pct
 
     # 📈 MARGIN LONG PARAMS
     params = {
@@ -933,7 +905,7 @@ def execute_long_margin(symbol, strategy, webhook_data=None):
 # --- MARGIN SHORT ---
 def execute_short_margin(symbol, strategy, webhook_data=None):
     lot = get_symbol_lot(symbol)
-    balance_usdc = get_balance_margin("USDC")
+    balance_quote = get_balance_margin(QUOTE)
 
     try:
         r = request_with_retries("GET", f"{BASE_URL}/api/v3/ticker/price", params={"symbol": symbol})
@@ -947,7 +919,7 @@ def execute_short_margin(symbol, strategy, webhook_data=None):
         raise Exception ("❌ Invalid price")
 
     risk_pct = resolve_risk_pct(webhook_data)
-    raw_qty = Decimal(str(balance_usdc * risk_pct)) / Decimal(str(price_est))
+    raw_qty = Decimal(str(balance_quote * risk_pct)) / Decimal(str(price_est))
 
     qty_str = borrowing(raw_qty, lot, price_est, symbol)
 
@@ -976,6 +948,7 @@ def execute_short_margin(symbol, strategy, webhook_data=None):
 
 # --- BORROWING (FOR SHORT) ---
 def borrowing(raw_qty, lot, price_est, symbol):
+    asset = get_base_asset(symbol)
     borrow_amount = float(raw_qty.quantize(Decimal(str(lot["stepSize_str"])), rounding=ROUND_DOWN))
 
     if borrow_amount <= 0 or borrow_amount < lot.get("minQty", 0.0):
@@ -986,7 +959,7 @@ def borrowing(raw_qty, lot, price_est, symbol):
 
     # 📥 BORROW PARAMS
     params = {
-        "asset": symbol.replace("USDC", ""),
+        "asset": asset,
         "amount": format(Decimal(str(borrow_amount)), "f"),
         "timestamp": _now_ms()
     }
@@ -1005,7 +978,7 @@ def borrowing(raw_qty, lot, price_est, symbol):
         borrow_amount
     )
 
-    logger.info(f"📥 Borrowed {borrowed_qty} {symbol.replace('USDC','')}")
+    logger.info(f"📥 Borrowed {borrowed_qty} {asset}")
     qty_str = floor_to_step_str(borrowed_qty, lot["stepSize_str"])
 
     if float(qty_str) < lot.get("minQty", 0.0):
@@ -1043,7 +1016,10 @@ def post_trade(symbol, strategy, side, resp, lot, webhook_data, trade_id):
         return
 
     side_emoji = "📈" if side == "Long" else "📉"
-    logger.info(f"[TRADE {trade_id}] {side_emoji} {side} executed {symbol}: qty={executed_qty} (spent≈{spent_qty:.5f} USDC)")
+    logger.info(
+        f"[TRADE {trade_id}] {side_emoji} {side} executed {symbol}: "
+        f"qty={executed_qty} (spent≈{spent_qty:.5f} {QUOTE})"
+    )
 
     if executed_qty > 0 and entry:
         sl_from_web = None
@@ -1054,7 +1030,7 @@ def post_trade(symbol, strategy, side, resp, lot, webhook_data, trade_id):
             tp_from_web = webhook_data.get("tp")
 
         # 📌 SL/TP PLACING
-        place_sl_tp_margin(
+        success, order_type = place_sl_tp_margin(
             symbol,
             side,
             entry,
@@ -1063,11 +1039,73 @@ def post_trade(symbol, strategy, side, resp, lot, webhook_data, trade_id):
             sl_override=sl_from_web,
             tp_override=tp_from_web,
             trade_id=trade_id
+        )
+
+        # 📋 LAST TRADE
+        if success:
+            update_last_trade(
+                symbol,
+                side,
+                order_type,
+                executed_qty,
+                spent_qty,
+                strategy
             )
 
-        update_last_trade(symbol, side, executed_qty, spent_qty, strategy)
-
     return executed_qty, entry
+
+
+# ====== TRADE COUNTER ======
+"""Thread-safe trade ID generator, daily trade summary logger, and midnight reset watcher."""
+
+# --- TRADE ID ---
+def next_trade_id(side):
+    global TRADE_COUNTER, DAILY_LONGS, DAILY_SHORTS, TOTAL_LONGS, TOTAL_SHORTS
+
+    # 📊 GENERAL TRADE COUNTER
+    with TRADE_LOCK:
+        TRADE_COUNTER += 1
+
+    # 📈 TRADE COUNTER LONG
+    if side == "Long":
+        DAILY_LONGS += 1
+        TOTAL_LONGS += 1
+
+    # 📉 TRADE COUNTER SHORT
+    elif side == "Short":
+        DAILY_SHORTS +=1
+        TOTAL_SHORTS +=1
+
+    return TRADE_COUNTER
+
+# --- DAILY SUMMARY ---
+def check_daily_summary():
+    global DAILY_LONGS, DAILY_SHORTS, CURRENT_DAY
+
+    now_day = datetime.utcnow().date()
+
+    if now_day != CURRENT_DAY:
+        total_trades = DAILY_LONGS + DAILY_SHORTS
+
+        if total_trades > 0:
+            # 📅 DAY SUMMARY LOGGER
+            logger.date(f"📅 Day {CURRENT_DAY} completed!")
+            logger.date(f"Trades: {total_trades}")
+            logger.date(f"(Longs: {DAILY_LONGS} | Shorts: {DAILY_SHORTS})")
+            logger.date("_____________________________________\n")
+
+        DAILY_LONGS = 0
+        DAILY_SHORTS = 0
+        CURRENT_DAY = now_day
+
+# --- DAILY WATCHER ---
+def daily_watcher():
+    while True:
+        check_daily_summary()
+        time.sleep(60)
+
+threading.Thread(target=daily_watcher, daemon=True).start()
+
 
 # ====== LAST TRADE PAYLOAD ======
 """Showcases a payload with the data of the las succesfully executed in the account."""
@@ -1076,7 +1114,7 @@ def post_trade(symbol, strategy, side, resp, lot, webhook_data, trade_id):
 LAST_TRADE = {}
 
 # --- LAST TARDE FUNCTION ---
-def update_last_trade(symbol: str, side: str, executed_qty: str, spent_qty: str, strategy: str):
+def update_last_trade(symbol: str, side: str, order_type: str, executed_qty: str, spent_qty: str, strategy: str):
     global LAST_TRADE
 
     # ⌚ LAST TRADE PAYLOAD
@@ -1084,6 +1122,7 @@ def update_last_trade(symbol: str, side: str, executed_qty: str, spent_qty: str,
         "tradeId": TRADE_COUNTER,
         "symbol": symbol,
         "side": side,
+        "order_type": order_type,
         "executed_qty": executed_qty,
         "spent_qty": spent_qty,
         "strategy": strategy,
@@ -1220,8 +1259,8 @@ def place_sl_tp_margin(symbol: str, side: str, entry: float, executed_qty: float
                 loss_sl = (sl_f - entry_f) * qty_f * direction
                 rr = abs(profit_tp / loss_sl) if loss_sl != 0 else 0
                 logger.info(f"[TRADE {trade_id}] 📌 OCO placed for {symbol}: TP={tp_price_str} ({oco_side}), SL={sl_price_str} ({oco_side}), qty={qty_f:.5f}")
-                logger.info(f"[TRADE {trade_id}] 🟢 TP PnL ≈ {profit_tp:.2f} USDC | 🔴 SL PnL ≈ {loss_sl:.2f} USDC | ⚖️ R:R {rr:.2f}")
-                return True
+                logger.info(f"[TRADE {trade_id}] 🟢 TP PnL ≈ {profit_tp:.2f} {QUOTE} | 🔴 SL PnL ≈ {loss_sl:.2f} {QUOTE} | ⚖️ R:R {rr:.2f}")
+                return True, order_type
             except Exception as e:
                 logger.error(f"⚠️ Failed OCO for {symbol}, payload={params}: {e}")
                 return False
@@ -1248,7 +1287,7 @@ def place_sl_tp_margin(symbol: str, side: str, entry: float, executed_qty: float
                     return err
 
                 logger.info(f"[TRADE {trade_id}] 🛑 SL placed for {symbol}: stop={sl_price_str}, limit={stop_limit_price}, qty={qty_f:.5f}")
-                return True
+                return True, order_type
             except Exception as e:
                 logger.error(f"⚠️ Could not place SL for {symbol}, payload={params}: {e}")
                 return False
@@ -1274,7 +1313,7 @@ def place_sl_tp_margin(symbol: str, side: str, entry: float, executed_qty: float
                     return err
 
                 logger.info(f"[TRADE {trade_id}] 🎯 TP placed for {symbol}: price={tp_price_str}, qty={qty_f:.5f}")
-                return True
+                return True, order_type
             except Exception as e:
                 logger.error(f"⚠️ Could not place TP for {symbol}, payload={params}: {e}")
                 return False
@@ -1302,10 +1341,10 @@ def store_snapshot(snapshot):
             "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
 
             # 💰 BALANCE
-            "totalBalanceUSDC": snapshot["totalBalanceUSDC"],
-            "usdcBalance": snapshot["usdcBalance"],
+            "totalBalance": snapshot["totalBalance"],
+            "quoteBalance": snapshot["quoteBalance"],
             "totalDebt": snapshot["totalDebt"],
-            "usdcBorrowed": snapshot["usdcBorrowed"],
+            "quoteBorrowed": snapshot["quoteBorrowed"],
 
             # ⚖ RISK
             "marginLevel": snapshot["marginLevel"],
@@ -1341,8 +1380,8 @@ def build_snapshot():
         raise Exception(f"Invalid margin account response: {acc}")
 
     total_debt = 0.0
-    usdc_balance = 0.0
-    usdc_borrowed = 0.0
+    quote_balance = 0.0
+    quote_borrowed = 0.0
     assets_with_balance = []
 
     for asset in acc["userAssets"]:
@@ -1350,44 +1389,44 @@ def build_snapshot():
         free = float(asset["free"])
         locked = float(asset["locked"])
 
-        # 💳 DEBT IN USDC
-        debt_usdc = 0.0
+        # 💳 DEBT IN QUOTE
+        quote_debt = 0.0
 
         if borrowed > 0:
 
-            if asset["asset"] == "USDC":
-                debt_usdc = borrowed
+            if asset["asset"] == QUOTE:
+                quote_debt = borrowed
 
             else:
                 try:
-                    symbol = f"{asset['asset']}USDC"
+                    symbol=build_symbol(asset["asset"])
                     r = request_with_retries("GET", f"{BASE_URL}/api/v3/ticker/price", params={"symbol": symbol})
                     price = float(r["price"])
-                    debt_usdc = borrowed * price
+                    quote_debt = borrowed * price
 
                 except Exception as e:
-                    logger.error(f"⚠️ Could not convert debt for {asset['asset']} to USDC: {e}")
+                    logger.error(f"⚠️ Could not convert debt for {asset['asset']} to {QUOTE}: {e}")
 
-            total_debt += debt_usdc
+            total_debt += quote_debt
 
         total_asset_balance = free + locked
 
-        if total_asset_balance > 0 and asset["asset"] != "USDC":
+        if total_asset_balance > 0 and asset["asset"] != QUOTE:
             assets_with_balance.append({ "asset": asset["asset"], "balance": round(total_asset_balance, 8)})
 
-        if asset["asset"] == "USDC":
-            usdc_balance = free + locked
-            usdc_borrowed = borrowed
+        if asset["asset"] == {QUOTE}:
+            quote_balance = free + locked
+            quote_borrowed = borrowed
 
     btc_usdc_price = 0.0
 
     try:
-        r = request_with_retries("GET", f"{BASE_URL}/api/v3/ticker/price", params={"symbol": "BTCUSDC"})
+        r = request_with_retries("GET", f"{BASE_URL}/api/v3/ticker/price", params={"symbol": build_symbol("BTC")})
         btc_usdc_price = float(r["price"])
     except Exception as e:
         logger.error(f"⚠️ BTC price fetch failed: {e}")
 
-    total_balance_usdc = float(acc["totalNetAssetOfBtc"]) * btc_usdc_price
+    total_balance = float(acc["totalNetAssetOfBtc"]) * btc_usdc_price
 
     # 🏷 ACCOUNT SNAPSHOT
     snapshot = {
@@ -1395,10 +1434,10 @@ def build_snapshot():
         "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
 
         # 💰 BALANCE
-        "totalBalanceUSDC": round(total_balance_usdc, 8),
-        "usdcBalance": round(usdc_balance, 8),
+        "totalBalance": round(total_balance, 8),
+        "quoteBalance": round(quote_balance, 8),
         "totalDebt": round(total_debt, 8),
-        "usdcBorrowed": round(usdc_borrowed, 8),
+        "quoteBorrowed": round(quote_borrowed, 8),
         "assetsWithBalance": assets_with_balance,
 
         # ⚖ RISK
@@ -1426,7 +1465,6 @@ def build_snapshot():
             # 🔢 ENV VARS
             "sl_pct": SL_PCT,
             "tp_pct": TP_PCT,
-            "snapshot_interval": SNAPSHOT_INTERVAL,
             "max_snapshots": MAX_SNAPSHOTS,
             "login_limit": LOGIN_LIMIT,
             "login_retry": LOGIN_RETRY,
@@ -1479,29 +1517,29 @@ def store_trade(trade):
     with TRADE_HISTORY_LOCK:
         TRADE_HISTORY.append(trade)
 
-        if len(TRADE_HISTORY) > 100000:
+        if len(TRADE_HISTORY) > MAX_HISTORY:
             TRADE_HISTORY.pop(0)
 
 
 # ====== MILESTONES ======
-"""Detects and logs balance milestones (1000, 2000, 5000... USDC) as they are reached for the first time."""
+"""Detects and logs balance milestones (1000, 2000, 5000...) as they are reached for the first time."""
 
 # --- MILESTONES SETTINGS ---
-MILESTONES_USDC = [1000, 2000, 5000, 10000, 20000, 50000]
+MILESTONES_QUOTE = [1000, 2000, 5000, 10000, 20000, 50000]
 REACHED_MILESTONES = set()
 
 # --- CHECK MILESTONES ---
-def check_milestones(total_balance_usdc: float):
+def check_milestones(total_balance: float):
     new_milestones = []
 
-    for milestone in MILESTONES_USDC:
-        if total_balance_usdc >= milestone and milestone not in REACHED_MILESTONES:
+    for milestone in MILESTONES_QUOTE:
+        if total_balance >= milestone and milestone not in REACHED_MILESTONES:
             REACHED_MILESTONES.add(milestone)
             new_milestones.append(milestone)
 
             # 🎉 MILESTONES LOGGER
             logger.info(f"🎉🎉 CONGRATS! 🎉🎉")
-            logger.info(f"💰 You reached {milestone:,.0f} USDC")
+            logger.info(f"💰 You reached {milestone:,.0f} {QUOTE}")
             logger.info(f"🚀 Keep it up. Compounding is working") 
             logger.info(f"🔥 Discipline > Luck\n")
 
@@ -1562,15 +1600,15 @@ logger.info("________________________________________\n")
 
 
 # ====== ADMIN FUNCTIONS ======
-"""Administrative operations: clear positions, borrow/repay USDC, toggle trading parameters, and restore defaults."""
+"""Administrative operations: clear positions, borrow/repay, toggle trading parameters, and restore defaults."""
 
 # --- ADMIN CLEAR ---
 def clear(symbol=None):
     if symbol:
-        logger_admin(f"🔁 ADMIN ACTION: Converting {symbol} to USDC...")
+        logger_admin(f"🔁 ADMIN ACTION: Converting {symbol} to {QUOTE}...")
         cancel(symbol)
     else:
-        logger_admin("🔁 ADMIN ACTION: Converting ALL assets to USDC...")
+        logger_admin("🔁 ADMIN ACTION: Converting ALL assets to {QUOTE}...")
         cancel_all()
 
     time.sleep(2)
@@ -1584,10 +1622,10 @@ def clear(symbol=None):
         locked_qty = float(asset["locked"])
         borrowed_qty = float(asset["borrowed"])
 
-        if asset_name == "USDC":
+        if asset_name == QUOTE:
             continue
 
-        asset_symbol = f"{asset_name}USDC"
+        asset_symbol=build_symbol(asset_name)
 
         if symbol and asset_symbol != symbol:
             continue
@@ -1598,7 +1636,7 @@ def clear(symbol=None):
         try:
             get_symbol_lot(asset_symbol)
         except:
-            logger.error(f"⚠️ No USDC pair for {asset_name}, skipping")
+            logger.error(f"⚠️ No {QUOTE} pair for {asset_name}, skipping")
             continue
 
         try:
@@ -1614,7 +1652,7 @@ def clear(symbol=None):
 
 # --- ADMIN BORROW ---
 def borrow(amount: float):
-    asset = "USDC"
+    asset = QUOTE
     logger_admin(f"📥 ADMIN ACTION: Borrow requested: {amount} {asset}")
 
     if amount <= 0:
@@ -1646,23 +1684,23 @@ def borrow(amount: float):
 
 # --- ADMIN REPAY ---
 def repay(amount):
-    asset = "USDC"
+    asset = QUOTE
     logger_admin(f"💳 ADMIN ACTION: Repay requested: {amount} {asset}")
 
     if isinstance(amount, str) and amount.lower() == "all":
         margin_info = get_margin_account()
 
-        borrowed_usdc = Decimal("0")
+        borrowed_quote = Decimal("0")
         for asset in margin_info["userAssets"]:
-            if asset["asset"] == "USDC":
-                borrowed_usdc = Decimal(asset["borrowed"])
+            if asset["asset"] == QUOTE:
+                borrowed_quote = Decimal(asset["borrowed"])
                 break
 
-        if borrowed_usdc <= 0:
+        if borrowed_quote <= 0:
             logger_admin("ℹ️ No {asset} debt to repay")
             return {"status": "nothing_to_repay"}
 
-        amount = borrowed_usdc
+        amount = borrowed_quote
         logger_admin(f"🔁 REPAY ALL → {amount} {asset}")
 
     amount = Decimal(str(amount))
@@ -1750,40 +1788,31 @@ def set_var(var_name, value):
 
 # --- ADMIN RESTORE ---
 def restore():
-    global TRADING, SL_OVERRIDE, TP_OVERRIDE, LOG_DEBUG, SL_PCT, TP_PCT, LOGIN_LIMIT, LOGIN_RETRY, SESSION_TIME
-
     logger_admin("💣 ADMIN ACTION: RESTORE default trading parameters")
-    TRADING = DFT_TRADING
-    SL_OVERRIDE = DFT_SL_OVERRIDE
-    TP_OVERRIDE = DFT_TP_OVERRIDE
-    LOG_DEBUG = DFT_LOG_DEBUG
-    SL_PCT = DFT_SL_PCT
-    TP_PCT = DFT_TP_PCT
-    LOGIN_LIMIT = DFT_LOGIN_LIMIT
-    LOGIN_RETRY = DFT_LOGIN_RETRY
-    SESSION_TIME = DFT_SESSION_TIME
-    logger_admin(f"🔄 TRADING restored → {TRADING}")
-    logger_admin(f"🔄 SL_OVERRIDE restored → {SL_OVERRIDE}")
-    logger_admin(f"🔄 TP_OVERRIDE restored → {TP_OVERRIDE}")
-    logger_admin(f"🔄 LOG_DEBUG restored → {LOG_DEBUG}")
-    logger_admin(f"🔄 SL_PCT restored → {SL_PCT}")
-    logger_admin(f"🔄 TP_PCT restored → {TP_PCT}")
-    logger_admin(f"🔄 LOGIN_LIMIT restored → {LOGIN_LIMIT}")
-    logger_admin(f"🔄 LOGIN_RETRY restored → {LOGIN_RETRY}")
-    logger_admin(f"🔄 SESSION_TIME restored → {SESSION_TIME}")
-    logger.info("✅ RESTORE completed\n")
-    return {
-        "TRADING": TRADING,
-        "SL_OVERRIDE": SL_OVERRIDE,
-        "TP_OVERRIDE": TP_OVERRIDE,
-        "LOG_DEBUG": LOG_DEBUG,
-        "status": "ok",
-        "SL_PCT": SL_PCT,
-        "TP_PCT": TP_PCT,
-        "LOGIN_LIMIT": LOGIN_LIMIT,
-        "LOGIN_RETRY": LOGIN_RETRY,
-        "SESSION_TIME": SESSION_TIME,
+
+    defaults = {
+        "TRADING": DFT_TRADING,
+        "SL_OVERRIDE": DFT_SL_OVERRIDE,
+        "TP_OVERRIDE": DFT_TP_OVERRIDE,
+        "LOG_DEBUG": DFT_LOG_DEBUG,
+        "SL_PCT": DFT_SL_PCT,
+        "TP_PCT": DFT_TP_PCT,
+        "LOGIN_LIMIT": DFT_LOGIN_LIMIT,
+        "LOGIN_RETRY": DFT_LOGIN_RETRY,
+        "SESSION_TIME": DFT_SESSION_TIME,
     }
+
+    globals().update(defaults)
+
+    for name, value in defaults.items():
+        logger_admin(f"🔄 {name} restored → {value}")
+
+    logger.info("✅ RESTORE completed\n")
+
+    result = defaults.copy()
+    result["status"] = "ok"
+
+    return result
 
 # --- SETTABLE VARS ---
 SETTABLE_VARS = {
@@ -2064,7 +2093,7 @@ def admin_logout():
 @app.route("/health", methods=["GET"])
 def health():
     uptime = int(time.time() - BOOT_TIME)
-    return jsonify({"bot_ready": BOT_READY, "trading": TRADING, "uptime_seconds": uptime, "mode": "TESTNET" if TESTNET else "LIVE"})
+    return jsonify({"bot_ready": BOT_READY, "trading": TRADING, "uptime_seconds": uptime})
 
 
 @app.route("/snapshot", methods=["GET"])
@@ -2076,7 +2105,7 @@ def admin_snapshot():
     try:
 
         snapshot = build_snapshot()
-        milestones = check_milestones(snapshot["totalBalanceUSDC"])
+        milestones = check_milestones(snapshot["totalBalance"])
         snapshot["milestonesReached"] = milestones
 
         if LOG_DEBUG:
@@ -2118,23 +2147,27 @@ def index():
             *{box-sizing:border-box;margin:0;padding:0}
             body{background:#0f172a;color:#e2e8f0;font-family:'Inter',sans-serif;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px 20px;transition:background 0.2s,color 0.2s;overflow-x:hidden}
             body.light{background:#f8fafc;color:#0f172a}
+
             .topbar{position:fixed;top:20px;right:20px}
             .theme-toggle{background:none;border:0.5px solid #334155;border-radius:20px;padding:4px 10px;cursor:pointer;font-size:13px;color:#94a3b8;transition:0.15s}
             body.light .theme-toggle{border-color:#cbd5e1;color:#64748b}
             .theme-toggle:hover{background:#1e293b}
             body.light .theme-toggle:hover{background:#e2e8f0}
+
             .adam-row{display:flex;align-items:center;justify-content:center;width:100%;max-width:1200px;gap:0}
             .adam-pre{font-family:'Courier New',monospace;font-size:11px;line-height:1.35;color:#334155;white-space:pre;flex-shrink:0;transition:color 0.2s}
             body.light .adam-pre{color:#1f2937}
             .adam-center{display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;min-width:200px;padding:0 16px}
             .logo{width:140px;margin-bottom:20px;opacity:0.95}
             .tagline{font-size:12px;letter-spacing:0.12em;color:#475569;text-transform:uppercase;margin-bottom:24px;font-family:'Courier New',monospace;text-align:center}
+
             .cards{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;width:100%;margin-bottom:24px}
             .card{background:#1e293b;border:0.5px solid #334155;border-radius:8px;padding:12px;text-align:center}
             body.light .card{background:#ffffff;border-color:#e2e8f0}
             .card-val{font-size:12px;font-family:'Courier New',monospace;color:#94a3b8;margin-bottom:4px}
             body.light .card-val{color:#475569}
             .card-label{font-size:12px;letter-spacing:0.06em;color:#475569;text-transform:uppercase}
+
             .btn-login{padding:8px 28px;font-size:11px;letter-spacing:0.06em;border:0.5px solid #334155;border-radius:6px;background:transparent;color:#94a3b8;cursor:pointer;text-decoration:none;transition:0.15s;font-family:'Inter',sans-serif;text-transform:uppercase}
             body.light .btn-login{border-color:#cbd5e1;color:#64748b}
             .btn-login:hover{background:#1e293b;color:#f1f5f9;border-color:#64748b}
@@ -2190,8 +2223,8 @@ def index():
                         <div class="card-label">Status</div>
                     </div>
                     <div class="card">
-                        <div class="card-val" id="mode">—</div>
-                        <div class="card-label">Mode</div>
+                        <div class="card-val" id="platform">—</div>
+                        <div class="card-label">Platform</div>
                     </div>
                     <div class="card">
                         <div class="card-val" id="uptime">—</div>
@@ -2240,8 +2273,6 @@ def index():
                     const d = await r.json();
                     document.getElementById('status').textContent = d.bot_ready ? 'Ready' : 'Booting';
                     document.getElementById('status').style.color = d.bot_ready ? '#4ade80' : '#fb923c';
-                    document.getElementById('mode').textContent = d.mode;
-                    document.getElementById('mode').style.color = d.mode === 'TESTNET' ? '#fbbf24' : '#4ade80';
                     const s = d.uptime_seconds;
                     const h = Math.floor(s / 3600);
                     const m = Math.floor((s % 3600) / 60);
@@ -2340,7 +2371,6 @@ def login():
 
             .btn{width:100%;padding:10px;background:transparent;border:0.5px solid #334155;border-radius:6px;color:#94a3b8;font-size:12px;letter-spacing:0.06em;text-transform:uppercase;cursor:pointer;transition:0.15s;font-family:'Inter',sans-serif;margin-top:4px}
             body.light .btn{border-color:#cbd5e1;color:#64748b}
-
             .btn:hover{background:#1e293b;color:#f1f5f9;border-color:#64748b}
             body.light .btn:hover{background:#e2e8f0;color:#0f172a}
 
@@ -2409,20 +2439,21 @@ def dashboard():
         <link rel="icon" type="image/png" href="/static/sgnticon.png">
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
         <style>
+            <!-- BOX STYLE -->
             *{box-sizing:border-box;margin:0;padding:0}
             body{background:#0f172a;color:#e2e8f0;font-family:'Inter',sans-serif;font-size:14px;transition:background 0.2s,color 0.2s}
             body.light{background:#f8fafc;color:#0f172a}
 
-            /* ── LAYOUT ── */
+            <!-- SIDEBAR STYLE -->
             .layout{display:flex;min-height:100vh}
             .sidebar{width:160px;min-width:160px;background:#0a1120;border-right:0.5px solid #1e293b;display:flex;flex-direction:column;padding:16px 0;position:fixed;top:0;left:0;height:100vh;z-index:50}
             body.light .sidebar{background:#f1f5f9;border-right-color:#e2e8f0}
             .main{margin-left:160px;display:flex;flex-direction:column;flex:1;min-height:100vh}
+
+            <!-- TOPBAR STYLE -->
             .topbar{position:fixed;top:0;left:160px;right:0;z-index:40;display:flex;justify-content:space-between;align-items:center;padding:0 20px;height:48px;background:#0f172a;border-bottom:0.5px solid #1e293b}
             body.light .topbar{background:#f8fafc;border-bottom-color:#e2e8f0}
             .content{padding:20px;margin-top:48px}
-
-            /* ── SIDEBAR ── */
             .sidebar-logo{display:flex;align-items:center;justify-content:center;padding:0 16px 16px;border-bottom:0.5px solid #1e293b;margin-bottom:8px}
             body.light .sidebar-logo{border-bottom-color:#e2e8f0}
             .nav-item{display:flex;align-items:center;gap:8px;padding:8px 16px;font-size:11px;letter-spacing:0.06em;text-transform:uppercase;color:#475569;text-decoration:none;cursor:pointer;transition:0.15s;border-left:2px solid transparent;font-family:'Courier New',monospace}
@@ -2432,22 +2463,36 @@ def dashboard():
             body.light .nav-item.active{color:#0f172a;border-left-color:#1D9E75;background:rgba(29,158,117,0.1)}
             body.light .nav-item{color:#64748b}
 
-            /* ── TOPBAR ── */
+            <!-- TOPBAR LEFT & RIGHT STYLE -->
             .topbar-left{display:flex;align-items:center;gap:10px}
             .topbar-right{display:flex;align-items:center;gap:8px}
+            .topbar-title{font-size:13px;font-weight:500;color:#f1f5f9}
+            body.light .topbar-title{color:#0f172a}
+
+            <!-- ACTIVE SIGNAL STYLE -->
             .dot{width:8px;height:8px;border-radius:50%;background:#1D9E75;display:inline-block}
             .dot.red{background:#E24B4A}
             .status-text{font-size:12px;color:#94a3b8;font-family:'Courier New',monospace}
             body.light .status-text{color:#64748b}
+
+            <!-- TAG STYLE -->
             .tag{font-size:12px;padding:2px 8px;border-radius:6px;border:0.5px solid;font-family:'Courier New',monospace}
             .tag-live{border-color:#1D9E75;color:#1D9E75}
-            .tag-testnet{border-color:#BA7517;color:#BA7517}
+
+            <!-- THEME TOGGLE STYLE -->
             .theme-toggle{background:none;border:0.5px solid #334155;border-radius:20px;padding:4px 10px;cursor:pointer;font-size:13px;color:#94a3b8;transition:0.15s}
             body.light .theme-toggle{border-color:#cbd5e1;color:#64748b}
             .theme-toggle:hover{background:#1e293b}
             body.light .theme-toggle:hover{background:#e2e8f0}
 
-            /* ── CARDS ── */
+            <!-- BUTTON STYLE -->
+            .btn{padding:5px 12px;font-size:11px;border:0.5px solid #334155;border-radius:6px;background:#0f172a;color:#94a3b8;cursor:pointer;white-space:nowrap;transition:0.15s}
+            body.light .btn{background:#f8fafc;border-color:#cbd5e1;color:#64748b}
+            .btn:hover{background:#1e293b;color:#f1f5f9}
+            body.light .btn:hover{background:#e2e8f0;color:#0f172a}
+            .btn-danger{border-color:#7f1d1d;color:#fca5a5}
+            .btn-danger:hover{background:#450a0a}
+
             .db{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;padding:12px 0}
             .card{background:#1e293b;border:0.5px solid #334155;border-radius:8px;padding:14px 16px}
             body.light .card{background:#ffffff;border-color:#e2e8f0}
@@ -2463,34 +2508,10 @@ def dashboard():
             body.light .metric-row .k{color:#64748b}
             .metric-row .v{color:#f1f5f9;font-weight:500;font-family:'Courier New',monospace}
             body.light .metric-row .v{color:#0f172a}
-            .toggle-row{display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:0.5px solid #1e293b}
-            body.light .toggle-row{border-bottom-color:#e2e8f0}
-            .toggle-row:last-child{border-bottom:none}
-            .toggle-label{font-size:12px;color:#94a3b8}
-            body.light .toggle-label{color:#64748b}
-            .toggle{position:relative;width:34px;height:18px;cursor:pointer}
-            .toggle input{opacity:0;width:0;height:0}
-            .slider{position:absolute;inset:0;background:#334155;border-radius:18px;transition:0.2s}
-            .slider:before{content:'';position:absolute;width:12px;height:12px;left:3px;top:3px;background:#94a3b8;border-radius:50%;transition:0.2s}
-            input:checked+.slider{background:#1D9E75}
-            input:checked+.slider:before{transform:translateX(16px);background:white}
-            .input-row{display:flex;gap:4px;margin-top:6px;align-items:center;flex-wrap:wrap}
-            .input-row input[type=number],.input-row input[type=text]{flex:1;min-width:60px;padding:5px 8px;font-size:12px;background:#0f172a;border:0.5px solid #334155;border-radius:6px;color:#f1f5f9;font-family:'Courier New',monospace}
-            body.light .input-row input[type=number],body.light .input-row input[type=text]{background:#f8fafc;border-color:#cbd5e1;color:#0f172a}
-            .btn{padding:5px 12px;font-size:11px;border:0.5px solid #334155;border-radius:6px;background:#0f172a;color:#94a3b8;cursor:pointer;white-space:nowrap;transition:0.15s}
-            body.light .btn{background:#f8fafc;border-color:#cbd5e1;color:#64748b}
-            .btn:hover{background:#1e293b;color:#f1f5f9}
-            body.light .btn:hover{background:#e2e8f0;color:#0f172a}
-            .btn-danger{border-color:#7f1d1d;color:#fca5a5}
-            .btn-danger:hover{background:#450a0a}
-            .btn-success{border-color:#14532d;color:#86efac}
-            .btn-success:hover{background:#052e16}
-            .btn-minmax{padding:3px 7px;font-size:10px;border:0.5px solid #334155;border-radius:4px;background:transparent;color:#475569;cursor:pointer;font-family:'Courier New',monospace;transition:0.15s}
-            .btn-minmax:hover{background:#1e293b;color:#94a3b8}
-            body.light .btn-minmax{border-color:#cbd5e1;color:#94a3b8}
-            body.light .btn-minmax:hover{background:#e2e8f0}
             .section-label{font-size:12px;letter-spacing:0.08em;color:#475569;text-transform:uppercase;margin:10px 0 4px;grid-column:1/-1;padding-left:2px}
-            .asset-row{display:flex;justify-content:space-between;font-size:12px;padding:2px 0;color:#94a3b8}
+            .asset-row{display:flex;justify-content:space-between;font-size:12px;padding:4px 0;border-bottom:0.5px solid #1e293b;color:#94a3b8}
+            body.light .asset-row{border-bottom-color:#e2e8f0}
+            .asset-row:last-child{border-bottom:none}
             .margin-bar-bg{height:4px;background:#334155;border-radius:4px;margin-top:4px;overflow:hidden}
             .margin-bar-fill{height:100%;border-radius:4px;background:#1D9E75;transition:width 0.4s}
             .toast{position:fixed;bottom:16px;right:16px;background:#1e293b;border:0.5px solid #334155;border-radius:8px;padding:8px 14px;font-size:12px;color:#f1f5f9;opacity:0;transition:opacity 0.3s;z-index:100;font-family:'Courier New',monospace}
@@ -2504,19 +2525,14 @@ def dashboard():
             .milestone-sub{font-size:12px;color:#64748b;margin-bottom:20px;line-height:1.6}
             .milestone-close{padding:8px 24px;font-size:11px;border:0.5px solid #334155;border-radius:6px;background:transparent;color:#94a3b8;cursor:pointer;letter-spacing:0.06em;text-transform:uppercase}
             .milestone-close:hover{background:#334155;color:#f1f5f9}
-            @media(max-width:600px){
-                .sidebar{display:none}
-                .main{margin-left:0}
-                .topbar{left:0}
-                .db{grid-template-columns:1fr}
-                .metric-big{font-size:18px}
-                .btn{min-height:36px;padding:8px 12px}
-                .btn-minmax{min-height:32px;padding:6px 8px}
-                .input-row input[type=number],.input-row input[type=text]{min-height:36px}
-                .toggle{width:40px;height:22px}
-                .slider:before{width:16px;height:16px}
-                input:checked+.slider:before{transform:translateX(18px)}
-            }
+            .assets-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px;margin-top:4px}
+            .asset-pill{background:#0f172a;border:0.5px solid #334155;border-radius:6px;padding:8px 12px;font-family:'Courier New',monospace}
+            body.light .asset-pill{background:#f8fafc;border-color:#e2e8f0}
+            .asset-pill-name{font-size:11px;color:#64748b;margin-bottom:2px}
+            .asset-pill-val{font-size:13px;color:#f1f5f9;font-weight:500}
+            body.light .asset-pill-val{color:#0f172a}
+            .asset-pill-low{opacity:0.4}
+            @media(max-width:600px){.sidebar{display:none}.main{margin-left:0}.topbar{left:0}.db{grid-template-columns:1fr}.metric-big{font-size:18px}}
         </style>
     </head>
     <body>
@@ -2531,30 +2547,31 @@ def dashboard():
     </div>
 
     <div class="layout">
-
-        <!-- SIDEBAR -->
         <nav class="sidebar">
+            <!-- SIDEBAR LOGO -->
             <div class="sidebar-logo">
                 <img src="/static/sgnticon.png" alt="SGNT" onclick="window.location.href='/'" style="cursor:pointer;width:32px">
             </div>
+            <!-- SIDEBAR CONTENT -->
             <a href="/dashboard" class="nav-item active">Dashboard</a>
             <a href="/logs" class="nav-item">Logs</a>
             <a href="/history" class="nav-item">History</a>
             <a href="/metrics" class="nav-item">Metrics</a>
+            <a href="/settings" class="nav-item">Settings</a>
         </nav>
 
         <div class="main">
-
             <!-- TOPBAR -->
             <div class="topbar">
+                <!-- TOPBAR LEFT -->
                 <div class="topbar-left">
                     <span class="dot" id="dot"></span>
                     <span class="status-text" id="status-text">Loading...</span>
                     <span class="tag tag-live" id="mode-tag">LIVE</span>
                 </div>
+                <!-- TOPBAR RIGHT -->
                 <div class="topbar-right">
                     <button class="btn" onclick="loadData()">Update</button>
-                    <button class="btn btn-danger" onclick="doRestore()">Restore</button>
                     <button class="btn btn-danger" onclick="doLogout()">Logout</button>
                     <button class="theme-toggle" onclick="toggleTheme()" id="theme-btn">🌙</button>
                 </div>
@@ -2562,145 +2579,58 @@ def dashboard():
 
             <!-- CONTENT -->
             <div class="content">
-            <div class="db">
+                <div class="db">
 
-                <div class="section-label">Account</div>
+                    <div class="section-label">Account</div>
 
-                <div class="card">
-                    <div class="card-title">Total Equity Balance</div>
-                    <div class="metric-big" id="total-balance">—</div>
-                    <div class="metric-label">USDC</div>
-                </div>
-                <div class="card">
-                    <div class="card-title">Free USDC Balance</div>
-                    <div class="metric-big" id="usdc-balance">—</div>
-                    <div class="metric-label">USDC</div>
-                </div>
-                <div class="card">
-                    <div class="card-title">Margin level</div>
-                    <div class="metric-big" id="margin-level">—</div>
-                    <div class="margin-bar-bg"><div class="margin-bar-fill" id="margin-bar" style="width:0%"></div></div>
-                </div>
-
-                <div class="card">
-                    <div class="card-title">Debt</div>
-                    <div class="metric-row"><span class="k">Total</span><span class="v" id="total-debt">—</span></div>
-                    <div class="metric-row"><span class="k">Borrowed USDC</span><span class="v" id="usdc-borrowed">—</span></div>
-                </div>
-                <div class="card">
-                    <div class="card-title">Assets with balance</div>
-                    <div id="assets-list"><span style="font-size:12px;color:#475569">—</span></div>
-                </div>
-                <div class="card">
-                    <div class="card-title">Last Trade</div>
-                    <div class="metric-row"><span class="k">Symbol</span><span class="v" id="lt-symbol">—</span></div>
-                    <div class="metric-row"><span class="k">Side</span><span class="v" id="lt-side">—</span></div>
-                    <div class="metric-row"><span class="k">Qty</span><span class="v" id="lt-qty">—</span></div>
-                    <div class="metric-row"><span class="k">Spent</span><span class="v" id="lt-spent">—</span></div>
-                    <div class="metric-row"><span class="k">Time</span><span class="v" id="lt-time" style="font-size:10px">—</span></div>
-                </div>
-
-                <div class="section-label">Trading</div>
-
-                <div class="card">
-                    <div class="card-title">Activity</div>
-                    <div class="metric-row"><span class="k">Last Trade ID</span><span class="v" id="last-trade-id">—</span></div>
-                    <div class="metric-row"><span class="k">Longs Today</span><span class="v" id="longs-today">—</span></div>
-                    <div class="metric-row"><span class="k">Shorts Today</span><span class="v" id="shorts-today">—</span></div>
-                    <div class="metric-row"><span class="k">Total Longs</span><span class="v" id="total-longs">—</span></div>
-                    <div class="metric-row"><span class="k">Total Shorts</span><span class="v" id="total-shorts">—</span></div>
-                </div>
-
-                <div class="card">
-                    <div class="card-title">Control</div>
-                    <div class="toggle-row"><span class="toggle-label">Trading</span><label class="toggle"><input type="checkbox" id="tog-trading" onchange="setVar('trading',this.checked)"><span class="slider"></span></label></div>
-                    <div class="toggle-row"><span class="toggle-label">Testnet</span><label class="toggle"><input type="checkbox" id="tog-testnet" onchange="setVar('testnet',this.checked)"><span class="slider"></span></label></div>
-                    <div class="toggle-row"><span class="toggle-label">SL Override</span><label class="toggle"><input type="checkbox" id="tog-sl" onchange="setVar('sl_override',this.checked)"><span class="slider"></span></label></div>
-                    <div class="toggle-row"><span class="toggle-label">TP Override</span><label class="toggle"><input type="checkbox" id="tog-tp" onchange="setVar('tp_override',this.checked)"><span class="slider"></span></label></div>
-                </div>
-
-                <div class="card">
-                    <div class="card-title">Parameters</div>
-                    <div style="font-size:11px;color:#64748b;margin-bottom:4px">SL % <span id="sl-val" style="color:#f1f5f9">—</span></div>
-                    <div class="input-row">
-                        <input type="number" id="sl-input" placeholder="{{ MIN_SL_PCT }}–{{ MAX_SL_PCT }}" step="0.1" min="{{ MIN_SL_PCT }}" max="{{ MAX_SL_PCT }}">
-                        <button class="btn-minmax" onclick="setInputVal('sl-input',{{ MIN_SL_PCT }})">min</button>
-                        <button class="btn-minmax" onclick="setInputVal('sl-input',{{ MAX_SL_PCT }})">max</button>
-                        <button class="btn" onclick="setVar('sl_pct', document.getElementById('sl-input').value)">Set</button>
+                    <div class="card">
+                        <div class="card-title">Total Equity Balance</div>
+                        <div class="metric-big" id="total-balance">—</div>
+                        <div class="metric-label">USDC</div>
                     </div>
-                    <div style="font-size:11px;color:#64748b;margin:8px 0 4px">TP % <span id="tp-val" style="color:#f1f5f9">—</span></div>
-                    <div class="input-row">
-                        <input type="number" id="tp-input" placeholder="{{ MIN_TP_PCT }}–{{ MAX_TP_PCT }}" step="0.1" min="{{ MIN_TP_PCT }}" max="{{ MAX_TP_PCT }}">
-                        <button class="btn-minmax" onclick="setInputVal('tp-input',{{ MIN_TP_PCT }})">min</button>
-                        <button class="btn-minmax" onclick="setInputVal('tp-input',{{ MAX_TP_PCT }})">max</button>
-                        <button class="btn" onclick="setVar('tp_pct', document.getElementById('tp-input').value)">Set</button>
+                    <div class="card">
+                        <div class="card-title">Free USDC Balance</div>
+                        <div class="metric-big" id="quote-balance">—</div>
+                        <div class="metric-label">USDC</div>
                     </div>
+                    <div class="card">
+                        <div class="card-title">Margin Level</div>
+                        <div class="metric-big" id="margin-level">—</div>
+                        <div class="margin-bar-bg"><div class="margin-bar-fill" id="margin-bar" style="width:0%"></div></div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-title">Debt</div>
+                        <div class="metric-row"><span class="k">Total</span><span class="v" id="total-debt">—</span></div>
+                        <div class="metric-row"><span class="k">Borrowed USDC</span><span class="v" id="quote-borrowed">—</span></div>
+                    </div>
+                    <div class="card">
+                        <div class="card-title">Activity</div>
+                        <div class="metric-row"><span class="k">Last Trade ID</span><span class="v" id="last-trade-id">—</span></div>
+                        <div class="metric-row"><span class="k">Longs Today</span><span class="v" id="longs-today">—</span></div>
+                        <div class="metric-row"><span class="k">Shorts Today</span><span class="v" id="shorts-today">—</span></div>
+                        <div class="metric-row"><span class="k">Total Longs</span><span class="v" id="total-longs">—</span></div>
+                        <div class="metric-row"><span class="k">Total Shorts</span><span class="v" id="total-shorts">—</span></div>
+                    </div>
+                    <div class="card">
+                        <div class="card-title">Last Trade</div>
+                        <div class="metric-row"><span class="k">Symbol</span><span class="v" id="lt-symbol">—</span></div>
+                        <div class="metric-row"><span class="k">Side</span><span class="v" id="lt-side">—</span></div>
+                        <div class="metric-row"><span class="k">Qty</span><span class="v" id="lt-qty">—</span></div>
+                        <div class="metric-row"><span class="k">Spent</span><span class="v" id="lt-spent">—</span></div>
+                        <div class="metric-row"><span class="k">Time</span><span class="v" id="lt-time" style="font-size:10px">—</span></div>
+                    </div>
+
+                    <div class="section-label">Assets with balance</div>
+
+                    <div class="card col-full" style="grid-column:1/-1">
+                        <div id="assets-grid" class="assets-grid">
+                            <span style="font-size:12px;color:#475569;font-family:'Courier New',monospace">—</span>
+                        </div>
+                    </div>
+
                 </div>
-
-                <div class="section-label">Admin</div>
-
-                <div class="card">
-                    <div class="card-title">Operations</div>
-                    <div style="font-size:11px;color:#94a3b8;margin:8px 0 4px">Borrow USDC</div>
-                    <div class="input-row">
-                        <input type="number" id="borrow-amt" placeholder="USDC quantity">
-                        <button class="btn btn-success" onclick="doBorrow()">Borrow</button>
-                    </div>
-                    <div style="font-size:11px;color:#94a3b8;margin:8px 0 4px">Repay USDC</div>
-                    <div class="input-row">
-                        <input type="text" id="repay-amt" placeholder="USDC quantity (or 'all')">
-                        <button class="btn btn-success" onclick="doRepay()">Repay</button>
-                        <button class="btn" onclick="document.getElementById('repay-amt').value='all'">All</button>
-                    </div>
-                    <div style="font-size:11px;color:#94a3b8;margin:8px 0 4px">Clear</div>
-                    <div class="input-row">
-                        <input type="text" id="clear-sym" placeholder="Symbol (empty = all)">
-                        <button class="btn btn-danger" onclick="doClear()">Clear</button>
-                    </div>
-                </div>
-
-                <div class="card">
-                    <div class="card-title">Admin Session</div>
-                    <div style="font-size:11px;color:#64748b;margin-bottom:4px">Session Time <span id="session-val" style="color:#f1f5f9">—</span> min</div>
-                    <div class="input-row">
-                        <input type="number" id="session-input" placeholder="{{ MIN_SESSION_TIME }}–{{ MAX_SESSION_TIME }}" min="{{ MIN_SESSION_TIME }}" max="{{ MAX_SESSION_TIME }}">
-                        <button class="btn-minmax" onclick="setInputVal('session-input',{{ MIN_SESSION_TIME }})">min</button>
-                        <button class="btn-minmax" onclick="setInputVal('session-input',{{ MAX_SESSION_TIME }})">max</button>
-                        <button class="btn" onclick="setVar('session_time',document.getElementById('session-input').value)">Set</button>
-                    </div>
-                    <div style="font-size:11px;color:#64748b;margin:8px 0 4px">Login Limit <span id="login-limit-val" style="color:#f1f5f9">—</span></div>
-                    <div class="input-row">
-                        <input type="number" id="login-limit-input" placeholder="{{ MIN_LOGIN_LIMIT }}–{{ MAX_LOGIN_LIMIT }}" min="{{ MIN_LOGIN_LIMIT }}" max="{{ MAX_LOGIN_LIMIT }}">
-                        <button class="btn-minmax" onclick="setInputVal('login-limit-input',{{ MIN_LOGIN_LIMIT }})">min</button>
-                        <button class="btn-minmax" onclick="setInputVal('login-limit-input',{{ MAX_LOGIN_LIMIT }})">max</button>
-                        <button class="btn" onclick="setVar('login_limit',document.getElementById('login-limit-input').value)">Set</button>
-                    </div>
-                    <div style="font-size:11px;color:#64748b;margin:8px 0 4px">Login Retry <span id="login-retry-val" style="color:#f1f5f9">—</span> min</div>
-                    <div class="input-row">
-                        <input type="number" id="login-retry-input" placeholder="{{ MIN_LOGIN_RETRY }}–{{ MAX_LOGIN_RETRY }}" min="{{ MIN_LOGIN_RETRY }}" max="{{ MAX_LOGIN_RETRY }}">
-                        <button class="btn-minmax" onclick="setInputVal('login-retry-input',{{ MIN_LOGIN_RETRY }})">min</button>
-                        <button class="btn-minmax" onclick="setInputVal('login-retry-input',{{ MAX_LOGIN_RETRY }})">max</button>
-                        <button class="btn" onclick="setVar('login_retry',document.getElementById('login-retry-input').value)">Set</button>
-                    </div>
-                </div>
-
-                <div class="card" style="display:flex;flex-direction:column;justify-content:space-between">
-                    <div class="card-title">System</div>
-                    <div style="font-size:11px;color:#64748b;margin-bottom:4px">
-                        Algorithm <span id="algo-val" style="color:#f1f5f9">—</span>
-                    </div>
-                    <div class="input-row" style="margin-bottom:8px">
-                        <select id="algo-select" style="flex:1;padding:5px 8px;font-size:12px;background:#0f172a;border:0.5px solid #334155;border-radius:6px;color:#f1f5f9;font-family:'Courier New',monospace">
-                            {{ algo_options | safe }}
-                        </select>
-                        <button class="btn" onclick="setVar('algorithm', document.getElementById('algo-select').value)">Set</button>
-                    </div>
-                    <div class="toggle-row"><span class="toggle-label">Log Debug</span><label class="toggle"><input type="checkbox" id="tog-debug" onchange="setVar('log_debug',this.checked)"><span class="slider"></span></label></div>
-                </div>
-
             </div>
-            </div>
-
         </div>
     </div>
 
@@ -2713,10 +2643,6 @@ def dashboard():
             t.style.borderColor = ok ? '#14532d' : '#7f1d1d';
             t.style.opacity = '1';
             setTimeout(() => t.style.opacity = '0', 2500);
-        }
-
-        function setInputVal(id, val) {
-            document.getElementById(id).value = val;
         }
 
         function showMilestone(amount) {
@@ -2759,10 +2685,10 @@ def dashboard():
             const fmt = n => n != null ? parseFloat(n).toFixed(2) : '—';
             const fmtI = n => n != null ? parseInt(n) : '—';
 
-            document.getElementById('total-balance').textContent = fmt(d.totalBalanceUSDC) + ' $';
-            document.getElementById('usdc-balance').textContent = fmt(d.usdcBalance) + ' $';
+            document.getElementById('total-balance').textContent = fmt(d.totalBalance) + ' $';
+            document.getElementById('quote-balance').textContent = fmt(d.quoteBalance) + ' $';
             document.getElementById('total-debt').textContent = fmt(d.totalDebt) + ' $';
-            document.getElementById('usdc-borrowed').textContent = fmt(d.usdcBorrowed) + ' $';
+            document.getElementById('quote-borrowed').textContent = fmt(d.quoteBorrowed) + ' $';
 
             const ml = parseFloat(d.marginLevel) || 0;
             document.getElementById('margin-level').textContent = ml >= 999 ? '999 (no debt)' : ml.toFixed(2);
@@ -2776,44 +2702,6 @@ def dashboard():
             document.getElementById('total-longs').textContent = fmtI(d.totalLongs);
             document.getElementById('total-shorts').textContent = fmtI(d.totalShorts);
 
-            const assets = d.assetsWithBalance || [];
-            const NOTIONAL_THRESHOLD = 1;
-            const above = assets.filter(a => a.balance >= NOTIONAL_THRESHOLD);
-            const below = assets.filter(a => a.balance < NOTIONAL_THRESHOLD);
-            let assetsHtml = '';
-            if (above.length) {
-                assetsHtml += above.map(a => `<div class="asset-row"><span>${a.asset}</span><span style="font-family:'Courier New',monospace">${a.balance}</span></div>`).join('');
-            }
-            if (below.length) {
-                if (above.length) assetsHtml += `<div style="border-top:0.5px solid #334155;margin:4px 0;opacity:0.4"></div>`;
-                assetsHtml += below.map(a => `<div class="asset-row" style="opacity:0.4"><span>${a.asset}</span><span style="font-family:'Courier New',monospace">${a.balance}</span></div>`).join('');
-            }
-            document.getElementById('assets-list').innerHTML = assetsHtml || '<span style="font-size:12px;color:#475569">No assets</span>';
-
-            document.getElementById('tog-trading').checked = !!v.trading;
-            document.getElementById('tog-testnet').checked = !!v.testnet;
-            document.getElementById('tog-sl').checked = !!v.sl_override;
-            document.getElementById('tog-tp').checked = !!v.tp_override;
-            document.getElementById('tog-debug').checked = !!v.log_debug;
-
-            document.getElementById('sl-val').textContent = v.sl_pct != null ? v.sl_pct + '%' : '—';
-            document.getElementById('tp-val').textContent = v.tp_pct != null ? v.tp_pct + '%' : '—';
-            document.getElementById('session-val').textContent = v.session_time != null ? v.session_time : '—';
-            document.getElementById('login-limit-val').textContent = v.login_limit != null ? v.login_limit : '—';
-            document.getElementById('login-retry-val').textContent = v.login_retry != null ? v.login_retry : '—';
-
-            const live = !!v.trading;
-            const testnet = !!v.testnet;
-            document.getElementById('dot').className = 'dot' + (live ? '' : ' red');
-            document.getElementById('status-text').textContent = live ? 'Trading active' : 'Trading paused';
-            document.getElementById('mode-tag').textContent = testnet ? 'TESTNET' : 'LIVE';
-            document.getElementById('mode-tag').className = 'tag ' + (testnet ? 'tag-testnet' : 'tag-live');
-
-            const milestones = d.milestonesReached || [];
-            if (milestones.length > 0) {
-                showMilestone(milestones[milestones.length - 1]);
-            }
-
             const lt = d.lastTrade || {};
             document.getElementById('lt-symbol').textContent = lt.symbol || '—';
             document.getElementById('lt-side').textContent = lt.side || '—';
@@ -2822,57 +2710,32 @@ def dashboard():
             document.getElementById('lt-spent').textContent = lt.spent_qty != null ? parseFloat(lt.spent_qty).toFixed(2) + ' $' : '—';
             document.getElementById('lt-time').textContent = lt.time || '—';
 
-            if (v.algorithm) {
-                document.getElementById('algo-val').textContent = v.algorithm;
-                document.getElementById('algo-select').value = v.algorithm;
+            const live = !!v.trading;
+            document.getElementById('dot').className = 'dot' + (live ? '' : ' red');
+            document.getElementById('status-text').textContent = live ? 'Trading active' : 'Trading paused';
+            document.getElementById('mode-tag').textContent = v.platform || 'LIVE';
+
+            const milestones = d.milestonesReached || [];
+            if (milestones.length > 0) showMilestone(milestones[milestones.length - 1]);
+
+            const assets = d.assetsWithBalance || [];
+            const THRESHOLD = 1;
+            const above = assets.filter(a => a.balance >= THRESHOLD);
+            const below = assets.filter(a => a.balance < THRESHOLD);
+            const all = [...above, ...below];
+            if (all.length === 0) {
+                document.getElementById('assets-grid').innerHTML = '<span style="font-size:12px;color:#475569;font-family:\'Courier New\',monospace">No assets with balance</span>';
+            } else {
+                document.getElementById('assets-grid').innerHTML = all.map(a => `
+                    <div class="asset-pill${a.balance < THRESHOLD ? ' asset-pill-low' : ''}">
+                        <div class="asset-pill-name">${a.asset}</div>
+                        <div class="asset-pill-val">${a.balance}</div>
+                    </div>`).join('');
             }
-        }
-
-        async function setVar(varName, val) {
-            if (val === undefined || val === null || val === '') {
-                toast('Insert value', false);
-                return;
-            }
-            let parsedVal = val;
-            if (typeof val === 'boolean') parsedVal = val ? 'true' : 'false';
-            const d = await api(`/set?var=${varName}&value=${encodeURIComponent(parsedVal)}`);
-            if (d && d.status === 'ok') toast(`${varName} updated`);
-            else toast(d?.msg || 'Error', false);
-            await loadData();
-        }
-
-        async function doBorrow() {
-            const amt = document.getElementById('borrow-amt').value;
-            if (!amt) { toast('Insert quantity', false); return; }
-            const d = await api(`/borrow?amount=${amt}`);
-            if (d) toast(`Borrow ${amt} USDC OK`);
-            await loadData();
-        }
-
-        async function doRepay() {
-            const amt = document.getElementById('repay-amt').value;
-            if (!amt) { toast('Insert quantity or "all"', false); return; }
-            const d = await api(`/repay?amount=${amt}`);
-            if (d) toast(`Repay ${amt} OK`);
-            await loadData();
-        }
-
-        async function doClear() {
-            const sym = document.getElementById('clear-sym').value.trim();
-            const url = sym ? `/clear?symbol=${sym}` : '/clear';
-            const d = await api(url);
-            if (d) toast(sym ? `Clear ${sym} OK` : 'Clear all OK');
-            await loadData();
-        }
-
-        async function doRestore() {
-            const d = await api('/restore');
-            if (d) toast('Restore completed');
-            await loadData();
         }
 
         async function doLogout() {
-            await api('/logout');
+            try { await fetch('/logout'); } catch(e) {}
             window.location.href = '/login';
         }
 
@@ -2889,22 +2752,7 @@ def dashboard():
     </body>
     </html>
     """
-    return render_template_string(html,
-    MIN_SL_PCT=MIN_SL_PCT,
-    MAX_SL_PCT=MAX_SL_PCT,
-    MIN_TP_PCT=MIN_TP_PCT,
-    MAX_TP_PCT=MAX_TP_PCT,
-    MIN_LOGIN_LIMIT=MIN_LOGIN_LIMIT,
-    MAX_LOGIN_LIMIT=MAX_LOGIN_LIMIT,
-    MIN_LOGIN_RETRY=MIN_LOGIN_RETRY,
-    MAX_LOGIN_RETRY=MAX_LOGIN_RETRY,
-    MIN_SESSION_TIME=MIN_SESSION_TIME,
-    MAX_SESSION_TIME=MAX_SESSION_TIME,
-    algo_options="\n".join(
-        f'<option value="{a}">{a}</option>'
-        for a in sorted(hashlib.algorithms_guaranteed)
-    ),
-)
+    return render_template_string(html)
 
 
 @app.route("/logs")
@@ -2979,13 +2827,18 @@ def logs():
         <link rel="icon" type="image/png" href="/static/sgnticon.png">
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
         <style>
+            <!-- BOX STYLE -->
             *{box-sizing:border-box;margin:0;padding:0}
             body{background:#0f172a;color:#e2e8f0;font-family:'Inter',sans-serif;font-size:14px;transition:background 0.2s,color 0.2s}
             body.light{background:#f8fafc;color:#0f172a}
+
+            <!-- SIDEBAR STYLE -->
             .layout{display:flex;min-height:100vh}
             .sidebar{width:160px;min-width:160px;background:#0a1120;border-right:0.5px solid #1e293b;display:flex;flex-direction:column;padding:16px 0;position:fixed;top:0;left:0;height:100vh;z-index:50}
             body.light .sidebar{background:#f1f5f9;border-right-color:#e2e8f0}
             .main{margin-left:160px;display:flex;flex-direction:column;flex:1;min-height:100vh}
+
+            <!-- TOPBAR STYLE -->
             .topbar{position:fixed;top:0;left:160px;right:0;z-index:40;display:flex;justify-content:space-between;align-items:center;padding:0 20px;height:48px;background:#0f172a;border-bottom:0.5px solid #1e293b}
             body.light .topbar{background:#f8fafc;border-bottom-color:#e2e8f0}
             .content{padding:20px;margin-top:48px}
@@ -2997,21 +2850,37 @@ def logs():
             .nav-item.active{color:#f1f5f9;border-left-color:#1D9E75;background:rgba(29,158,117,0.08)}
             body.light .nav-item.active{color:#0f172a;border-left-color:#1D9E75;background:rgba(29,158,117,0.1)}
             body.light .nav-item{color:#64748b}
+
+            <!-- TOPBAR LEFT & RIGHT STYLE -->
             .topbar-left{display:flex;align-items:center;gap:10px}
             .topbar-right{display:flex;align-items:center;gap:8px}
             .topbar-title{font-size:13px;font-weight:500;color:#f1f5f9}
             body.light .topbar-title{color:#0f172a}
+
+            <!-- ACTIVE SIGNAL STYLE -->
+            .dot{width:8px;height:8px;border-radius:50%;background:#1D9E75;display:inline-block}
+            .dot.red{background:#E24B4A}
+            .status-text{font-size:12px;color:#94a3b8;font-family:'Courier New',monospace}
+            body.light .status-text{color:#64748b}
+
+            <!-- TAG STYLE -->
+            .tag{font-size:12px;padding:2px 8px;border-radius:6px;border:0.5px solid;font-family:'Courier New',monospace}
+            .tag-live{border-color:#1D9E75;color:#1D9E75}
+
+            <!-- THEME TOGGLE STYLE -->
             .theme-toggle{background:none;border:0.5px solid #334155;border-radius:20px;padding:4px 10px;cursor:pointer;font-size:13px;color:#94a3b8;transition:0.15s}
             body.light .theme-toggle{border-color:#cbd5e1;color:#64748b}
             .theme-toggle:hover{background:#1e293b}
             body.light .theme-toggle:hover{background:#e2e8f0}
+
+            <!-- BUTTON STYLE -->
             .btn{padding:5px 12px;font-size:11px;border:0.5px solid #334155;border-radius:6px;background:#0f172a;color:#94a3b8;cursor:pointer;white-space:nowrap;transition:0.15s;text-decoration:none;display:inline-block}
             body.light .btn{background:#f8fafc;border-color:#cbd5e1;color:#64748b}
             .btn:hover{background:#1e293b;color:#f1f5f9}
             body.light .btn:hover{background:#e2e8f0;color:#0f172a}
             .btn-danger{border-color:#7f1d1d;color:#fca5a5}
             .btn-danger:hover{background:#450a0a}
-            .btn-blue{border-color:#1e40af;color:#93c5fd}
+
             .refresh-toggle{display:flex;align-items:center;gap:6px;font-size:11px;color:#64748b;font-family:'Courier New',monospace}
             .toggle{position:relative;width:28px;height:15px;cursor:pointer}
             .toggle input{opacity:0;width:0;height:0}
@@ -3053,19 +2922,28 @@ def logs():
 
     <div class="layout">
         <nav class="sidebar">
+            <!-- SIDEBAR LOGO -->
             <div class="sidebar-logo">
                 <img src="/static/sgnticon.png" alt="SGNT" onclick="window.location.href='/'" style="cursor:pointer;width:32px">
             </div>
+            <!-- SIDEBAR CONTENT -->
             <a href="/dashboard" class="nav-item">Dashboard</a>
             <a href="/logs" class="nav-item active">Logs</a>
             <a href="/history" class="nav-item">History</a>
             <a href="/metrics" class="nav-item">Metrics</a>
+            <a href="/settings" class="nav-item">Settings</a>
         </nav>
 
         <div class="main">
+            <!-- TOPBAR -->
             <div class="topbar">
+                <!-- TOPBAR LEFT -->
                 <div class="topbar-left">
+                    <span class="dot" id="dot"></span>
+                    <span class="status-text" id="status-text">Loading...</span>
+                    <span class="tag tag-live" id="mode-tag">LIVE</span>
                 </div>
+                <!-- TOPBAR RIGHT -->
                 <div class="topbar-right">
                     <div class="refresh-toggle">
                         <label class="toggle">
@@ -3080,6 +2958,7 @@ def logs():
                 </div>
             </div>
 
+            <!-- CONTENT -->
             <div class="content">
                 <div class="section-label">Live preview — last 250 lines</div>
                 <pre id="log-preview">{% for line in preview %}<span class="{{ line | log_class }}">{{ line }}</span>{% endfor %}</pre>
@@ -3188,13 +3067,19 @@ def history():
         <link rel="icon" type="image/png" href="/static/sgnticon.png">
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
         <style>
+
+            <!-- BOX STYLE -->
             *{box-sizing:border-box;margin:0;padding:0}
             body{background:#0f172a;color:#e2e8f0;font-family:'Inter',sans-serif;font-size:14px;transition:background 0.2s,color 0.2s}
             body.light{background:#f8fafc;color:#0f172a}
+
+            <!-- SIDEBAR STYLE -->
             .layout{display:flex;min-height:100vh}
             .sidebar{width:160px;min-width:160px;background:#0a1120;border-right:0.5px solid #1e293b;display:flex;flex-direction:column;padding:16px 0;position:fixed;top:0;left:0;height:100vh;z-index:50}
             body.light .sidebar{background:#f1f5f9;border-right-color:#e2e8f0}
             .main{margin-left:160px;display:flex;flex-direction:column;flex:1;min-height:100vh}
+
+            <!-- TOPBAR STYLE -->
             .topbar{position:fixed;top:0;left:160px;right:0;z-index:40;display:flex;justify-content:space-between;align-items:center;padding:0 20px;height:48px;background:#0f172a;border-bottom:0.5px solid #1e293b}
             body.light .topbar{background:#f8fafc;border-bottom-color:#e2e8f0}
             .content{padding:20px;margin-top:48px}
@@ -3206,20 +3091,38 @@ def history():
             .nav-item.active{color:#f1f5f9;border-left-color:#1D9E75;background:rgba(29,158,117,0.08)}
             body.light .nav-item.active{color:#0f172a;border-left-color:#1D9E75;background:rgba(29,158,117,0.1)}
             body.light .nav-item{color:#64748b}
+
+            <!-- TOPBAR LEFT & RIGHT STYLE -->
             .topbar-left{display:flex;align-items:center;gap:10px}
             .topbar-right{display:flex;align-items:center;gap:8px}
             .topbar-title{font-size:13px;font-weight:500;color:#f1f5f9}
             body.light .topbar-title{color:#0f172a}
+
+            <!-- ACTIVE SIGNAL STYLE -->
+            .dot{width:8px;height:8px;border-radius:50%;background:#1D9E75;display:inline-block}
+            .dot.red{background:#E24B4A}
+            .status-text{font-size:12px;color:#94a3b8;font-family:'Courier New',monospace}
+            body.light .status-text{color:#64748b}
+
+            <!-- TAG STYLE -->
+            .tag{font-size:12px;padding:2px 8px;border-radius:6px;border:0.5px solid;font-family:'Courier New',monospace}
+            .tag-live{border-color:#1D9E75;color:#1D9E75}
+
+            <!-- THEME TOGGLE STYLE -->
             .theme-toggle{background:none;border:0.5px solid #334155;border-radius:20px;padding:4px 10px;cursor:pointer;font-size:13px;color:#94a3b8;transition:0.15s}
             body.light .theme-toggle{border-color:#cbd5e1;color:#64748b}
             .theme-toggle:hover{background:#1e293b}
             body.light .theme-toggle:hover{background:#e2e8f0}
+
+            <!-- BUTTON STYLE -->
             .btn{padding:5px 12px;font-size:11px;border:0.5px solid #334155;border-radius:6px;background:#0f172a;color:#94a3b8;cursor:pointer;white-space:nowrap;transition:0.15s;text-decoration:none;display:inline-block}
             body.light .btn{background:#f8fafc;border-color:#cbd5e1;color:#64748b}
             .btn:hover{background:#1e293b;color:#f1f5f9}
             body.light .btn:hover{background:#e2e8f0;color:#0f172a}
             .btn-danger{border-color:#7f1d1d;color:#fca5a5}
             .btn-danger:hover{background:#450a0a}
+
+            <!-- OTHERS STYLE -->
             .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px}
             .stat{background:#1e293b;border:0.5px solid #334155;border-radius:8px;padding:10px 14px}
             body.light .stat{background:#ffffff;border-color:#e2e8f0}
@@ -3259,19 +3162,28 @@ def history():
 
     <div class="layout">
         <nav class="sidebar">
+            <!-- SIDEBAR LOGO -->
             <div class="sidebar-logo">
                 <img src="/static/sgnticon.png" alt="SGNT" onclick="window.location.href='/'" style="cursor:pointer;width:32px">
             </div>
+            <!-- SIDEBAR CONTENT -->
             <a href="/dashboard" class="nav-item">Dashboard</a>
             <a href="/logs" class="nav-item">Logs</a>
             <a href="/history" class="nav-item active">History</a>
             <a href="/metrics" class="nav-item">Metrics</a>
+            <a href="/settings" class="nav-item">Settings</a>
         </nav>
 
         <div class="main">
+            <!-- TOPBAR -->
             <div class="topbar">
+                <!-- TOPBAR LEFT -->
                 <div class="topbar-left">
+                    <span class="dot" id="dot"></span>
+                    <span class="status-text" id="status-text">Loading...</span>
+                    <span class="tag tag-live" id="mode-tag">LIVE</span>
                 </div>
+                <!-- TOPBAR RIGHT -->
                 <div class="topbar-right">
                     <span id="count-badge" style="font-size:11px;color:#475569;font-family:'Courier New',monospace"></span>
                     <button class="btn" id="export-btn">Export CSV</button>
@@ -3280,6 +3192,7 @@ def history():
                 </div>
             </div>
 
+            <!-- CONTENT -->
             <div class="content">
                 <div class="stats">
                     <div class="stat"><div class="stat-val" id="s-total">—</div><div class="stat-label">Total trades</div></div>
@@ -3473,24 +3386,36 @@ def metrics():
     sidebar_html = """
     <div class="layout">
         <nav class="sidebar">
+            <!-- SIDEBAR LOGO -->
             <div class="sidebar-logo">
                 <img src="/static/sgnticon.png" alt="SGNT" onclick="window.location.href='/'" style="cursor:pointer;width:32px">
             </div>
+            <!-- SIDEBAR CONTENT -->
             <a href="/dashboard" class="nav-item">Dashboard</a>
             <a href="/logs" class="nav-item">Logs</a>
             <a href="/history" class="nav-item">History</a>
             <a href="/metrics" class="nav-item active">Metrics</a>
+            <a href="/settings" class="nav-item">Settings</a>
         </nav>
+
         <div class="main">
+            <!-- TOPBAR -->
             <div class="topbar">
+                <!-- TOPBAR LEFT -->
                 <div class="topbar-left">
+                    <span class="dot" id="dot"></span>
+                    <span class="status-text" id="status-text">Loading...</span>
+                    <span class="tag tag-live" id="mode-tag">LIVE</span>
                 </div>
+                <!-- TOPBAR RIGHT -->
                 <div class="topbar-right">
                     <span class="snapshot-count">{count} snapshots</span>
                     <button class="btn btn-danger" onclick="doLogout()">Logout</button>
                     <button class="theme-toggle" onclick="toggleTheme()" id="theme-btn">🌙</button>
                 </div>
             </div>
+
+            <!-- CONTENT -->
             <div class="content">
     """.format(count=len(SNAPSHOT_HISTORY))
 
@@ -3516,6 +3441,12 @@ def metrics():
         .topbar-left{display:flex;align-items:center;gap:10px}
         .topbar-right{display:flex;align-items:center;gap:8px}
         .topbar-title{font-size:13px;font-weight:500;color:#f1f5f9}
+        .dot{width:8px;height:8px;border-radius:50%;background:#1D9E75;display:inline-block}
+        .dot.red{background:#E24B4A}
+        .status-text{font-size:12px;color:#94a3b8;font-family:'Courier New',monospace}
+        body.light .status-text{color:#64748b}
+        .tag{font-size:12px;padding:2px 8px;border-radius:6px;border:0.5px solid;font-family:'Courier New',monospace}
+        .tag-live{border-color:#1D9E75;color:#1D9E75}
         body.light .topbar-title{color:#0f172a}
         .btn{padding:5px 12px;font-size:11px;border:0.5px solid #334155;border-radius:6px;background:#0f172a;color:#94a3b8;cursor:pointer;white-space:nowrap;transition:0.15s}
         body.light .btn{background:#f8fafc;border-color:#cbd5e1;color:#64748b}
@@ -3589,6 +3520,7 @@ def metrics():
 
     {sidebar_html}
 
+        <!-- BALANCE CHART CARD -->
         <div class="chart-card">
             <div class="chart-header">
                 <span class="chart-title">Balance</span>
@@ -3597,6 +3529,7 @@ def metrics():
             <canvas id="balanceChart"></canvas>
         </div>
 
+        <!-- MARGIN LEVEL CHART CARD -->
         <div class="chart-card">
             <div class="chart-header">
                 <span class="chart-title">Margin level</span>
@@ -3605,6 +3538,7 @@ def metrics():
             <canvas id="marginChart"></canvas>
         </div>
 
+        <!-- ACTIVITY CHART CARD -->
         <div class="chart-card">
             <div class="chart-header">
                 <span class="chart-title">Activity</span>
@@ -3617,7 +3551,6 @@ def metrics():
 
     <script>
     const data = {json.dumps(SNAPSHOT_HISTORY)};
-    const SNAPSHOT_INTERVAL = {SNAPSHOT_INTERVAL};
     const labels = data.map(d => d.time);
 
     const isLight = localStorage.getItem('sgnt-theme') === 'light';
@@ -3664,10 +3597,10 @@ def metrics():
     new Chart(document.getElementById('balanceChart'), {{
         type: 'line',
         data: {{labels, datasets: [
-            dataset("Total Balance", "totalBalanceUSDC", "#22d3ee"),
-            dataset("USDC Balance", "usdcBalance", "#4ade80"),
+            dataset("Total Balance", "totalBalance", "#22d3ee"),
+            dataset("USDC Balance", "quoteBalance", "#4ade80"),
             dataset("Debt", "totalDebt", "#f87171"),
-            dataset("Borrowed", "usdcBorrowed", "#fb923c")
+            dataset("Borrowed", "quoteBorrowed", "#fb923c")
         ]}},
         options: commonOptions
     }});
@@ -3714,12 +3647,11 @@ def metrics():
     }});
 
     const activityDatasets = [];
-    if (SNAPSHOT_INTERVAL === 1) {{
-        activityDatasets.push(
-            {{type:'bar', label:'Longs Today', data: data.map(d => d.longsToday), backgroundColor:'rgba(74,222,128,0.5)', stack:'daily'}},
-            {{type:'bar', label:'Shorts Today', data: data.map(d => d.shortsToday), backgroundColor:'rgba(248,113,113,0.5)', stack:'daily'}}
-        );
-    }}
+    activityDatasets.push(
+        {{type:'bar', label:'Longs Today', data: data.map(d => d.longsToday), backgroundColor:'rgba(74,222,128,0.5)', stack:'daily'}},
+        {{type:'bar', label:'Shorts Today', data: data.map(d => d.shortsToday), backgroundColor:'rgba(248,113,113,0.5)', stack:'daily'}}
+    );
+
     activityDatasets.push(
         {{type:'line', label:'Total Longs', data: data.map(d => d.totalLongs), borderColor:'#4ade80', tension:0.3, pointRadius:2, yAxisID:'y1'}},
         {{type:'line', label:'Total Shorts', data: data.map(d => d.totalShorts), borderColor:'#f87171', tension:0.3, pointRadius:2, yAxisID:'y1'}},
@@ -3733,7 +3665,7 @@ def metrics():
             plugins: {{legend: {{labels: {{font: {{size: 11}}, boxWidth: 12}}}}}},
             scales: {{
                 x: {{ticks: {{font: {{size: 10}}, maxTicksLimit: 8}}, grid: {{color: gridColor()}}}},
-                y: {{ beginAtZero: true, stacked: SNAPSHOT_INTERVAL === 1, ticks: {{ font: {{ size: 10 }}, stepSize: 1 }}, grid: {{ color: gridColor() }}, title: {{ display: true, text: 'Daily', font: {{ size: 10 }}, color: '#475569' }} }},
+                y: {{ beginAtZero: true, stacked: true, ticks: {{ font: {{ size: 10 }}, stepSize: 1 }}, grid: {{ color: gridColor() }}, title: {{ display: true, text: 'Daily', font: {{ size: 10 }}, color: '#475569' }} }},
                 y1: {{ beginAtZero: true, position: 'right', ticks: {{ font: {{ size: 10 }} }}, grid: {{ drawOnChartArea: false }}, title: {{ display: true, text: 'Total', font: {{ size: 10 }}, color: '#475569' }} }}
             }}
         }}
@@ -3749,6 +3681,345 @@ def metrics():
     </body>
     </html>
     """
+
+
+@app.route("/settings")
+def settings():
+    if not is_admin_authenticated():
+        return handle_unauthorized()
+
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta name="description" content="SGNT — Automated margin trading system.">
+        <title>SGNT • Settings</title>
+        <link rel="icon" type="image/png" href="/static/sgnticon.png">
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
+        <style>
+            <!-- BOX STYLE -->
+            *{box-sizing:border-box;margin:0;padding:0}
+            body{background:#0f172a;color:#e2e8f0;font-family:'Inter',sans-serif;font-size:14px;transition:background 0.2s,color 0.2s}
+            body.light{background:#f8fafc;color:#0f172a}
+
+            <!-- SIDEBAR STYLE -->
+            .layout{display:flex;min-height:100vh}
+            .sidebar{width:160px;min-width:160px;background:#0a1120;border-right:0.5px solid #1e293b;display:flex;flex-direction:column;padding:16px 0;position:fixed;top:0;left:0;height:100vh;z-index:50}
+            body.light .sidebar{background:#f1f5f9;border-right-color:#e2e8f0}
+            .main{margin-left:160px;display:flex;flex-direction:column;flex:1;min-height:100vh}
+
+            <!-- TOPBAR STYLE -->
+            .topbar{position:fixed;top:0;left:160px;right:0;z-index:40;display:flex;justify-content:space-between;align-items:center;padding:0 20px;height:48px;background:#0f172a;border-bottom:0.5px solid #1e293b}
+            body.light .topbar{background:#f8fafc;border-bottom-color:#e2e8f0}
+            .content{padding:20px;margin-top:48px}
+            .sidebar-logo{display:flex;align-items:center;justify-content:center;padding:0 16px 16px;border-bottom:0.5px solid #1e293b;margin-bottom:8px}
+            body.light .sidebar-logo{border-bottom-color:#e2e8f0}
+            .nav-item{display:flex;align-items:center;gap:8px;padding:8px 16px;font-size:11px;letter-spacing:0.06em;text-transform:uppercase;color:#475569;text-decoration:none;cursor:pointer;transition:0.15s;border-left:2px solid transparent;font-family:'Courier New',monospace}
+            .nav-item:hover{color:#94a3b8;background:rgba(255,255,255,0.03)}
+            body.light .nav-item:hover{background:rgba(0,0,0,0.04)}
+            .nav-item.active{color:#f1f5f9;border-left-color:#1D9E75;background:rgba(29,158,117,0.08)}
+            body.light .nav-item.active{color:#0f172a;border-left-color:#1D9E75;background:rgba(29,158,117,0.1)}
+            body.light .nav-item{color:#64748b}
+
+            <!-- TOPBAR LEFT & RIGHT STYLE -->
+            .topbar-left{display:flex;align-items:center;gap:10px}
+            .topbar-right{display:flex;align-items:center;gap:8px}
+            .topbar-title{font-size:13px;font-weight:500;color:#f1f5f9}
+            body.light .topbar-title{color:#0f172a}
+
+            <!-- ACTIVE SIGNAL STYLE -->
+            .dot{width:8px;height:8px;border-radius:50%;background:#1D9E75;display:inline-block}
+            .dot.red{background:#E24B4A}
+            .status-text{font-size:12px;color:#94a3b8;font-family:'Courier New',monospace}
+            body.light .status-text{color:#64748b}
+
+            <!-- TAG STYLE -->
+            .tag{font-size:12px;padding:2px 8px;border-radius:6px;border:0.5px solid;font-family:'Courier New',monospace}
+            .tag-live{border-color:#1D9E75;color:#1D9E75}
+
+            <!-- THEME TOGGLE STYLE -->
+            .theme-toggle{background:none;border:0.5px solid #334155;border-radius:20px;padding:4px 10px;cursor:pointer;font-size:13px;color:#94a3b8;transition:0.15s}
+            body.light .theme-toggle{border-color:#cbd5e1;color:#64748b}
+            .theme-toggle:hover{background:#1e293b}
+            body.light .theme-toggle:hover{background:#e2e8f0}
+
+            <!-- BUTTON STYLE -->
+            .btn{padding:5px 12px;font-size:11px;border:0.5px solid #334155;border-radius:6px;background:#0f172a;color:#94a3b8;cursor:pointer;white-space:nowrap;transition:0.15s}
+            body.light .btn{background:#f8fafc;border-color:#cbd5e1;color:#64748b}
+            .btn:hover{background:#1e293b;color:#f1f5f9}
+            body.light .btn:hover{background:#e2e8f0;color:#0f172a}
+            .btn-danger{border-color:#7f1d1d;color:#fca5a5}
+            .btn-danger:hover{background:#450a0a}
+
+            <!-- OTHERS STYLE -->
+            .btn-success{border-color:#14532d;color:#86efac}
+            .btn-success:hover{background:#052e16}
+            .btn-minmax{padding:3px 7px;font-size:10px;border:0.5px solid #334155;border-radius:4px;background:transparent;color:#475569;cursor:pointer;font-family:'Courier New',monospace;transition:0.15s}
+            .btn-minmax:hover{background:#1e293b;color:#94a3b8}
+            body.light .btn-minmax{border-color:#cbd5e1;color:#94a3b8}
+            body.light .btn-minmax:hover{background:#e2e8f0}
+            .db{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;padding:12px 0}
+            .card{background:#1e293b;border:0.5px solid #334155;border-radius:8px;padding:14px 16px}
+            body.light .card{background:#ffffff;border-color:#e2e8f0}
+            .card-title{font-size:12px;letter-spacing:0.08em;color:#64748b;text-transform:uppercase;margin-bottom:10px;border-bottom:0.5px solid #334155;padding-bottom:6px}
+            body.light .card-title{border-bottom-color:#e2e8f0}
+            .toggle-row{display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:0.5px solid #1e293b}
+            body.light .toggle-row{border-bottom-color:#e2e8f0}
+            .toggle-row:last-child{border-bottom:none}
+            .toggle-label{font-size:12px;color:#94a3b8}
+            body.light .toggle-label{color:#64748b}
+            .toggle{position:relative;width:34px;height:18px;cursor:pointer}
+            .toggle input{opacity:0;width:0;height:0}
+            .slider{position:absolute;inset:0;background:#334155;border-radius:18px;transition:0.2s}
+            .slider:before{content:'';position:absolute;width:12px;height:12px;left:3px;top:3px;background:#94a3b8;border-radius:50%;transition:0.2s}
+            input:checked+.slider{background:#1D9E75}
+            input:checked+.slider:before{transform:translateX(16px);background:white}
+            .input-row{display:flex;gap:4px;margin-top:6px;align-items:center;flex-wrap:wrap}
+            .input-row input[type=number],.input-row input[type=text]{flex:1;min-width:60px;padding:5px 8px;font-size:12px;background:#0f172a;border:0.5px solid #334155;border-radius:6px;color:#f1f5f9;font-family:'Courier New',monospace}
+            body.light .input-row input[type=number],body.light .input-row input[type=text]{background:#f8fafc;border-color:#cbd5e1;color:#0f172a}
+            .section-label{font-size:12px;letter-spacing:0.08em;color:#475569;text-transform:uppercase;margin:10px 0 4px;grid-column:1/-1;padding-left:2px}
+            .toast{position:fixed;bottom:16px;right:16px;background:#1e293b;border:0.5px solid #334155;border-radius:8px;padding:8px 14px;font-size:12px;color:#f1f5f9;opacity:0;transition:opacity 0.3s;z-index:100;font-family:'Courier New',monospace}
+            @media(max-width:600px){.sidebar{display:none}.main{margin-left:0}.topbar{left:0}.db{grid-template-columns:1fr}}
+        </style>
+    </head>
+    <body>
+
+    <div class="layout">
+        <nav class="sidebar">
+            <!-- SIDEBAR LOGO -->
+            <div class="sidebar-logo">
+                <img src="/static/sgnticon.png" alt="SGNT" onclick="window.location.href='/'" style="cursor:pointer;width:32px">
+            </div>
+            <!-- SIDEBAR CONTENT -->
+            <a href="/dashboard" class="nav-item">Dashboard</a>
+            <a href="/logs" class="nav-item">Logs</a>
+            <a href="/history" class="nav-item">History</a>
+            <a href="/metrics" class="nav-item">Metrics</a>
+            <a href="/settings" class="nav-item active">Settings</a>
+        </nav>
+
+        <div class="main">
+            <!-- TOPBAR -->
+            <div class="topbar">
+                <!-- TOPBAR LEFT -->
+                <div class="topbar-left">
+                    <span class="dot" id="dot"></span>
+                    <span class="status-text" id="status-text">Loading...</span>
+                    <span class="tag tag-live" id="mode-tag">LIVE</span>
+                </div>
+                <!-- TOPBAR RIGHT -->
+                <div class="topbar-right">
+                    <button class="btn btn-danger" onclick="doRestore()">Restore defaults</button>
+                    <button class="btn btn-danger" onclick="doLogout()">Logout</button>
+                    <button class="theme-toggle" onclick="toggleTheme()" id="theme-btn">🌙</button>
+                </div>
+            </div>
+
+            <!-- CONTENT -->
+            <div class="content">
+                <div class="db">
+
+                    <div class="section-label">Trading</div>
+
+                    <div class="card">
+                        <div class="card-title">Control</div>
+                        <div class="toggle-row"><span class="toggle-label">Trading</span><label class="toggle"><input type="checkbox" id="tog-trading" onchange="setVar('trading',this.checked)"><span class="slider"></span></label></div>
+                        <div class="toggle-row"><span class="toggle-label">SL Override</span><label class="toggle"><input type="checkbox" id="tog-sl" onchange="setVar('sl_override',this.checked)"><span class="slider"></span></label></div>
+                        <div class="toggle-row"><span class="toggle-label">TP Override</span><label class="toggle"><input type="checkbox" id="tog-tp" onchange="setVar('tp_override',this.checked)"><span class="slider"></span></label></div>
+                        <div class="toggle-row"><span class="toggle-label">Log Debug</span><label class="toggle"><input type="checkbox" id="tog-debug" onchange="setVar('log_debug',this.checked)"><span class="slider"></span></label></div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-title">Parameters</div>
+                        <div style="font-size:11px;color:#64748b;margin-bottom:4px">SL % <span id="sl-val" style="color:#f1f5f9">—</span></div>
+                        <div class="input-row">
+                            <input type="number" id="sl-input" placeholder="{{ MIN_SL_PCT }}–{{ MAX_SL_PCT }}" step="0.1" min="{{ MIN_SL_PCT }}" max="{{ MAX_SL_PCT }}">
+                            <button class="btn-minmax" onclick="setInputVal('sl-input',{{ MIN_SL_PCT }})">min</button>
+                            <button class="btn-minmax" onclick="setInputVal('sl-input',{{ MAX_SL_PCT }})">max</button>
+                            <button class="btn" onclick="setVar('sl_pct', document.getElementById('sl-input').value)">Set</button>
+                        </div>
+                        <div style="font-size:11px;color:#64748b;margin:8px 0 4px">TP % <span id="tp-val" style="color:#f1f5f9">—</span></div>
+                        <div class="input-row">
+                            <input type="number" id="tp-input" placeholder="{{ MIN_TP_PCT }}–{{ MAX_TP_PCT }}" step="0.1" min="{{ MIN_TP_PCT }}" max="{{ MAX_TP_PCT }}">
+                            <button class="btn-minmax" onclick="setInputVal('tp-input',{{ MIN_TP_PCT }})">min</button>
+                            <button class="btn-minmax" onclick="setInputVal('tp-input',{{ MAX_TP_PCT }})">max</button>
+                            <button class="btn" onclick="setVar('tp_pct', document.getElementById('tp-input').value)">Set</button>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-title">Platform</div>
+                        <div style="font-size:11px;color:#64748b;margin-bottom:6px">Active platform</div>
+                        <div style="font-size:13px;color:#f1f5f9;font-family:'Courier New',monospace" id="platform-val">—</div>
+                    </div>
+
+                    <div class="section-label">Admin</div>
+
+                    <div class="card">
+                        <div class="card-title">Operations</div>
+                        <div style="font-size:11px;color:#94a3b8;margin:8px 0 4px">Borrow USDC</div>
+                        <div class="input-row">
+                            <input type="number" id="borrow-amt" placeholder="USDC quantity">
+                            <button class="btn btn-success" onclick="doBorrow()">Borrow</button>
+                        </div>
+                        <div style="font-size:11px;color:#94a3b8;margin:8px 0 4px">Repay USDC</div>
+                        <div class="input-row">
+                            <input type="text" id="repay-amt" placeholder="USDC quantity (or 'all')">
+                            <button class="btn btn-success" onclick="doRepay()">Repay</button>
+                            <button class="btn" onclick="document.getElementById('repay-amt').value='all'">All</button>
+                        </div>
+                        <div style="font-size:11px;color:#94a3b8;margin:8px 0 4px">Clear</div>
+                        <div class="input-row">
+                            <input type="text" id="clear-sym" placeholder="Symbol (empty = all)">
+                            <button class="btn btn-danger" onclick="doClear()">Clear</button>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-title">Admin Session</div>
+                        <div style="font-size:11px;color:#64748b;margin-bottom:4px">Session Time <span id="session-val" style="color:#f1f5f9">—</span> min</div>
+                        <div class="input-row">
+                            <input type="number" id="session-input" placeholder="{{ MIN_SESSION_TIME }}–{{ MAX_SESSION_TIME }}" min="{{ MIN_SESSION_TIME }}" max="{{ MAX_SESSION_TIME }}">
+                            <button class="btn-minmax" onclick="setInputVal('session-input',{{ MIN_SESSION_TIME }})">min</button>
+                            <button class="btn-minmax" onclick="setInputVal('session-input',{{ MAX_SESSION_TIME }})">max</button>
+                            <button class="btn" onclick="setVar('session_time',document.getElementById('session-input').value)">Set</button>
+                        </div>
+                        <div style="font-size:11px;color:#64748b;margin:8px 0 4px">Login Limit <span id="login-limit-val" style="color:#f1f5f9">—</span></div>
+                        <div class="input-row">
+                            <input type="number" id="login-limit-input" placeholder="{{ MIN_LOGIN_LIMIT }}–{{ MAX_LOGIN_LIMIT }}" min="{{ MIN_LOGIN_LIMIT }}" max="{{ MAX_LOGIN_LIMIT }}">
+                            <button class="btn-minmax" onclick="setInputVal('login-limit-input',{{ MIN_LOGIN_LIMIT }})">min</button>
+                            <button class="btn-minmax" onclick="setInputVal('login-limit-input',{{ MAX_LOGIN_LIMIT }})">max</button>
+                            <button class="btn" onclick="setVar('login_limit',document.getElementById('login-limit-input').value)">Set</button>
+                        </div>
+                        <div style="font-size:11px;color:#64748b;margin:8px 0 4px">Login Retry <span id="login-retry-val" style="color:#f1f5f9">—</span> min</div>
+                        <div class="input-row">
+                            <input type="number" id="login-retry-input" placeholder="{{ MIN_LOGIN_RETRY }}–{{ MAX_LOGIN_RETRY }}" min="{{ MIN_LOGIN_RETRY }}" max="{{ MAX_LOGIN_RETRY }}">
+                            <button class="btn-minmax" onclick="setInputVal('login-retry-input',{{ MIN_LOGIN_RETRY }})">min</button>
+                            <button class="btn-minmax" onclick="setInputVal('login-retry-input',{{ MAX_LOGIN_RETRY }})">max</button>
+                            <button class="btn" onclick="setVar('login_retry',document.getElementById('login-retry-input').value)">Set</button>
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="toast" id="toast"></div>
+
+    <script>
+        function toast(msg, ok=true) {
+            const t = document.getElementById('toast');
+            t.textContent = msg;
+            t.style.borderColor = ok ? '#14532d' : '#7f1d1d';
+            t.style.opacity = '1';
+            setTimeout(() => t.style.opacity = '0', 2500);
+        }
+
+        function setInputVal(id, val) {
+            document.getElementById(id).value = val;
+        }
+
+        function toggleTheme() {
+            const light = document.body.classList.toggle('light');
+            document.getElementById('theme-btn').textContent = light ? '☀️' : '🌙';
+            localStorage.setItem('sgnt-theme', light ? 'light' : 'dark');
+        }
+
+        if (localStorage.getItem('sgnt-theme') === 'light') {
+            document.body.classList.add('light');
+            document.getElementById('theme-btn').textContent = '☀️';
+        }
+
+        async function api(url) {
+            try {
+                const r = await fetch(url);
+                if (r.status === 403) {
+                    toast('Session expired', false);
+                    setTimeout(() => window.location.href = '/login', 1500);
+                    return null;
+                }
+                return await r.json();
+            } catch(e) { toast('Network error', false); return null; }
+        }
+
+        async function loadData() {
+            const d = await api('/snapshot');
+            if (!d) return;
+            const v = d.variables || {};
+            document.getElementById('tog-trading').checked = !!v.trading;
+            document.getElementById('tog-sl').checked = !!v.sl_override;
+            document.getElementById('tog-tp').checked = !!v.tp_override;
+            document.getElementById('tog-debug').checked = !!v.log_debug;
+            document.getElementById('sl-val').textContent = v.sl_pct != null ? v.sl_pct + '%' : '—';
+            document.getElementById('tp-val').textContent = v.tp_pct != null ? v.tp_pct + '%' : '—';
+            document.getElementById('session-val').textContent = v.session_time != null ? v.session_time : '—';
+            document.getElementById('login-limit-val').textContent = v.login_limit != null ? v.login_limit : '—';
+            document.getElementById('login-retry-val').textContent = v.login_retry != null ? v.login_retry : '—';
+            document.getElementById('platform-val').textContent = v.platform || '—';
+        }
+
+        async function setVar(varName, val) {
+            if (val === undefined || val === null || val === '') { toast('Insert value', false); return; }
+            let parsedVal = val;
+            if (typeof val === 'boolean') parsedVal = val ? 'true' : 'false';
+            const d = await api(`/set?var=${varName}&value=${encodeURIComponent(parsedVal)}`);
+            if (d && d.status === 'ok') toast(`${varName} updated`);
+            else toast(d?.msg || 'Error', false);
+            await loadData();
+        }
+
+        async function doBorrow() {
+            const amt = document.getElementById('borrow-amt').value;
+            if (!amt) { toast('Insert quantity', false); return; }
+            const d = await api(`/borrow?amount=${amt}`);
+            if (d) toast(`Borrow ${amt} USDC OK`);
+        }
+
+        async function doRepay() {
+            const amt = document.getElementById('repay-amt').value;
+            if (!amt) { toast('Insert quantity or "all"', false); return; }
+            const d = await api(`/repay?amount=${amt}`);
+            if (d) toast(`Repay ${amt} OK`);
+        }
+
+        async function doClear() {
+            const sym = document.getElementById('clear-sym').value.trim();
+            const url = sym ? `/clear?symbol=${sym}` : '/clear';
+            const d = await api(url);
+            if (d) toast(sym ? `Clear ${sym} OK` : 'Clear all OK');
+        }
+
+        async function doRestore() {
+            const d = await api('/restore');
+            if (d) toast('Restore completed');
+            await loadData();
+        }
+
+        async function doLogout() {
+            try { await fetch('/logout'); } catch(e) {}
+            window.location.href = '/login';
+        }
+
+        loadData();
+    </script>
+
+    </body>
+    </html>
+    """
+    return render_template_string(html,
+    MIN_SL_PCT=MIN_SL_PCT,
+    MAX_SL_PCT=MAX_SL_PCT,
+    MIN_TP_PCT=MIN_TP_PCT,
+    MAX_TP_PCT=MAX_TP_PCT,
+    MIN_LOGIN_LIMIT=MIN_LOGIN_LIMIT,
+    MAX_LOGIN_LIMIT=MAX_LOGIN_LIMIT,
+    MIN_LOGIN_RETRY=MIN_LOGIN_RETRY,
+    MAX_LOGIN_RETRY=MAX_LOGIN_RETRY,
+    MIN_SESSION_TIME=MIN_SESSION_TIME,
+    MAX_SESSION_TIME=MAX_SESSION_TIME,
+)
 
 
 # ====== FLASK EXECUTION ======
